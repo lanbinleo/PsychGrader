@@ -2,6 +2,7 @@ package pdfparse
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,20 +13,28 @@ import (
 	"psychgrader/internal/models"
 )
 
+const maxPDFPages = 80
+
 // ExtractPages extracts plain text per page (1-indexed) from a PDF byte slice.
 // It prefers poppler's pdftotext when available (as in our Docker container) and
 // falls back cleanly to the pure-Go ledongthuc/pdf parser.
-func ExtractPages(data []byte) ([]string, error) {
+func ExtractPages(ctx context.Context, data []byte) ([]string, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty PDF file")
 	}
-	if pages, err := extractWithPdftotext(data); err == nil && len(pages) > 0 {
+	if pages, err := extractWithPdftotext(ctx, data); err == nil && len(pages) > 0 {
+		if len(pages) > maxPDFPages {
+			return nil, fmt.Errorf("PDF 页数 %d 超过上限 %d", len(pages), maxPDFPages)
+		}
 		return pages, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("PDF 解析超时或已取消: %w", err)
 	}
 	return extractPureGo(data)
 }
 
-func extractWithPdftotext(data []byte) ([]string, error) {
+func extractWithPdftotext(ctx context.Context, data []byte) ([]string, error) {
 	bin, err := exec.LookPath("pdftotext")
 	if err != nil {
 		return nil, err
@@ -43,7 +52,7 @@ func extractWithPdftotext(data []byte) ([]string, error) {
 
 	outTxt := tmp.Name() + ".txt"
 	defer os.Remove(outTxt)
-	cmd := exec.Command(bin, "-layout", tmp.Name(), outTxt)
+	cmd := exec.CommandContext(ctx, bin, "-layout", tmp.Name(), outTxt)
 	if err := cmd.Run(); err != nil {
 		return nil, err
 	}
@@ -68,6 +77,9 @@ func extractPureGo(data []byte) ([]string, error) {
 		return nil, fmt.Errorf("failed to parse PDF: %w", err)
 	}
 	total := reader.NumPage()
+	if total > maxPDFPages {
+		return nil, fmt.Errorf("PDF 页数 %d 超过上限 %d", total, maxPDFPages)
+	}
 	pages := make([]string, 0, total)
 	for i := 1; i <= total; i++ {
 		p := reader.Page(i)

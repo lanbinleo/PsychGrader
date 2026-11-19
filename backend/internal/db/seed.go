@@ -6,12 +6,16 @@ import (
 )
 
 func (s *Store) seedIfEmpty() error {
+	if s.GetSetting("seeded", "") == "1" {
+		return nil
+	}
 	var cnt int
 	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM problem_sets`).Scan(&cnt); err != nil {
 		return err
 	}
 	if cnt > 0 {
-		return nil
+		// Existing install: never reseed after the teacher deletes everything.
+		return s.SetSetting("seeded", "1")
 	}
 
 	ebq := &models.ProblemSet{
@@ -284,5 +288,8 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		IneligibleConcepts: []string{},
 		ScoringNotes:       "6-part AAQ rubric (Parts A–E 1 pt each, Part F Argumentation 2 pts = 7 pts total).",
 	}
-	return s.CreateProblemSet(aaq)
+	if err := s.CreateProblemSet(aaq); err != nil {
+		return err
+	}
+	return s.SetSetting("seeded", "1")
 }

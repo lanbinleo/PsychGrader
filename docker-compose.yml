@@ -4,15 +4,22 @@ services:
     container_name: psychgrader
     restart: unless-stopped
     ports:
-      - "${HOST_PORT:-8090}:8090"
+      # Only loopback by default; put Caddy/Nginx/Cloudflare Tunnel in front.
+      - "127.0.0.1:${HOST_PORT:-8090}:8090"
     environment:
+      - HOST=0.0.0.0
       - PORT=8090
       - DB_PATH=/app/data/psychgrader.db
       - STATIC_DIR=/app/static
       - ADMIN_PASSCODE=${ADMIN_PASSCODE:-}
-      - APP_SECRET=${APP_SECRET:-psychgrader-secret-change-me}
+      - APP_SECRET=${APP_SECRET:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
       - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-flash}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
       - ./data:/app/data

@@ -50,6 +50,7 @@ type Annotation struct {
 	PartID       string        `json:"part_id"`  // "part_a", "part_b_i", "part_b_ii", "part_c_i", "part_c_ii"
 	Badge        string        `json:"badge"`
 	CommentZh    string        `json:"comment_zh"`
+	Flags        []string      `json:"flags,omitempty"`
 	ConceptCheck *ConceptCheck `json:"concept_check,omitempty"`
 }
 
@@ -87,7 +88,7 @@ type Submission struct {
 	StudentCode  string         `json:"student_code"`
 	PageRange    string         `json:"page_range"`
 	RawText      string         `json:"raw_text"`
-	Status       string         `json:"status"` // "pending" | "grading" | "ai_graded" | "reviewed" | "error"
+	Status       string         `json:"status"` // "pending" | "queued" | "grading" | "ai_graded" | "needs_rereview" | "reviewed" | "error" | "canceled"
 	AIScore      *int           `json:"ai_score"`
 	FinalScore   *int           `json:"final_score"`
 	Result       *GradingResult `json:"result,omitempty"`
@@ -104,6 +105,35 @@ type SplitSegment struct {
 	PageRange   string `json:"page_range"`
 	RawText     string `json:"raw_text"`
 	WordCount   int    `json:"word_count"`
+}
+
+// GradingTask is a persistent batch-grading job. The UI polls this object
+// instead of inferring progress from submission statuses.
+type GradingTask struct {
+	ID           int64      `json:"id"`
+	ProblemSetID int64      `json:"problem_set_id"`
+	Status       string     `json:"status"` // "queued" | "running" | "paused" | "completed" | "failed" | "canceled"
+	Total        int        `json:"total"`
+	Succeeded    int        `json:"succeeded"`
+	Failed       int        `json:"failed"`
+	Canceled     int        `json:"canceled"`
+	Source       string     `json:"source"`
+	ErrorSummary string     `json:"error_summary,omitempty"`
+	Current      []TaskItem `json:"current"`
+	CreatedAt    string     `json:"created_at"`
+	StartedAt    string     `json:"started_at,omitempty"`
+	FinishedAt   string     `json:"finished_at,omitempty"`
+}
+
+// TaskItem is the per-submission state inside a GradingTask.
+type TaskItem struct {
+	TaskID       int64  `json:"task_id"`
+	SubmissionID int64  `json:"submission_id"`
+	StudentName  string `json:"student_name"`
+	Status       string `json:"status"` // "queued" | "running" | "succeeded" | "failed" | "canceled" | "superseded"
+	ErrorMsg     string `json:"error_msg,omitempty"`
+	StartedAt    string `json:"started_at,omitempty"`
+	FinishedAt   string `json:"finished_at,omitempty"`
 }
 
 type AppSettings struct {

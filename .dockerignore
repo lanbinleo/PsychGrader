@@ -1,0 +1,19 @@
+# Credentials and runtime data
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+data/
+backend/data/
+*.db
+*.db-shm
+*.db-wal
+*.exe
+test-artifacts/
+docs/
+
+# Build output and dependencies
+frontend/node_modules/
+frontend/dist/
+backend/psychgrader

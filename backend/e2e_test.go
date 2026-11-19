@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"psychgrader/internal/db"
@@ -236,7 +237,7 @@ func TestFullEndToEndPipeline(t *testing.T) {
 		OK    bool   `json:"ok"`
 		Reply string `json:"reply"`
 	}
-	if code := doJSON("POST", "/api/settings/test", map[string]any{}, &pingOut); code != 200 || !pingOut.OK {
+	if code := doJSON("POST", "/api/settings/test", map[string]any{"api_key": "sk-mock-deepseek-v41"}, &pingOut); code != 200 || !pingOut.OK {
 		t.Fatalf("LLM test endpoint failed: code=%d out=%+v", code, pingOut)
 	}
 
@@ -337,13 +338,71 @@ func TestFullEndToEndPipeline(t *testing.T) {
 		t.Fatalf("teacher review failed: code=%d sub=%+v", code, reviewedSub)
 	}
 
+	// 8.5 Reviewed submissions are protected unless the caller explicitly forces.
+	var conflict map[string]any
+	if code := doJSON("POST", fmt.Sprintf("/api/submissions/%d/grade", lucasID), nil, &conflict); code != 409 {
+		t.Fatalf("expected 409 when regrading a reviewed submission, got %d: %+v", code, conflict)
+	}
+	var forced models.Submission
+	if code := doJSON("POST", fmt.Sprintf("/api/submissions/%d/grade", lucasID), map[string]any{"force": true}, &forced); code != 200 {
+		t.Fatalf("forced regrade failed: code=%d", code)
+	}
+	if forced.Status != "needs_rereview" {
+		t.Fatalf("expected needs_rereview after forced regrade, got %q", forced.Status)
+	}
+	if forced.FinalScore == nil || *forced.FinalScore != 7 {
+		t.Fatalf("teacher final score must be preserved, got %+v", forced.FinalScore)
+	}
+	if forced.Result == nil || len(forced.Result.RubricParts) < 5 || forced.Result.RubricParts[4].TeacherScore == nil {
+		t.Fatalf("teacher rubric override must be merged into the new AI result: %+v", forced.Result)
+	}
+
+	// 8.6 Batch grading creates a persistent task and the second call is idempotent.
+	sophiaID := importOut.Submissions[1].ID
+	var batchOut struct {
+		Task  models.GradingTask `json:"task"`
+		Reuse bool               `json:"reused"`
+		Queued int               `json:"queued"`
+	}
+	if code := doJSON("POST", "/api/problem-sets/1/grade-all", map[string]any{"only_unscored": true}, &batchOut); code != 202 {
+		t.Fatalf("grade-all failed: code=%d", code)
+	}
+	if batchOut.Task.ID == 0 || batchOut.Task.Total != 1 || batchOut.Queued != 1 {
+		t.Fatalf("unexpected batch task: %+v", batchOut)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var current models.GradingTask
+		if code := doJSON("GET", fmt.Sprintf("/api/tasks/%d", batchOut.Task.ID), nil, &current); code != 200 {
+			t.Fatalf("get task failed: %d", code)
+		}
+		if current.Status == "completed" || current.Status == "failed" || current.Status == "canceled" {
+			if current.Status != "completed" || current.Succeeded != 1 {
+				t.Fatalf("batch did not complete successfully: %+v", current)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("batch task timed out: %+v", current)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	var sophia models.Submission
+	if code := doJSON("GET", fmt.Sprintf("/api/submissions/%d", sophiaID), nil, &sophia); code != 200 {
+		t.Fatalf("get sophia failed: %d", code)
+	}
+	if sophia.Status != "ai_graded" || sophia.Result == nil {
+		t.Fatalf("sophia should be graded by the batch task: %+v", sophia)
+	}
+
 	// 9. Verify CED glossary search & CSV gradebook export
 	var cedHits []cedEntryStub
 	if code := doJSON("GET", "/api/ced/search?q=interference", nil, &cedHits); code != 200 || len(cedHits) == 0 {
 		t.Fatalf("expected CED hits for interference, got code=%d len=%d", code, len(cedHits))
 	}
 
-	csvReq, _ := http.NewRequest("GET", ts.URL+"/api/problem-sets/1/export.csv?token="+loginBody.Token, nil)
+	csvReq, _ := http.NewRequest("GET", ts.URL+"/api/problem-sets/1/export.csv", nil)
+	csvReq.Header.Set("Authorization", "Bearer "+loginBody.Token)
 	csvResp, err := http.DefaultClient.Do(csvReq)
 	if err != nil {
 		t.Fatalf("export csv: %v", err)

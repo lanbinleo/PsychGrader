@@ -22,6 +22,7 @@ import { api } from './api';
 import type {
   Annotation,
   AnnotationCategory,
+  GradingTask,
   ProblemSet,
   RubricPartScore,
   SplitSegment,
@@ -61,7 +62,9 @@ export interface GradeViewProps {
   activeSub: Submission | null;
   draftParts: RubricPartScore[];
   draftNotes: string;
+  draftDirty: boolean;
   activePartId: string | null;
+  batch: GradingTask | null;
   onBack: () => void;
   onSelectSub: (s: Submission) => void;
   onSetPartScore: (partId: string, score: number) => void;
@@ -69,22 +72,29 @@ export interface GradeViewProps {
   onSetNotes: (n: string) => void;
   onResetToAI: () => void;
   onSubUpdated: (s: Submission) => void;
-  onSubsRefresh: () => void;
+  onSubsRefresh: () => Promise<Submission[]>;
+  onBatchStarted: (task: GradingTask) => void;
+  onCancelBatch: (id: number) => void;
+  onResumeBatch: (id: number) => void;
+  onDismissBatch: () => void;
   toast: (m: string) => void;
 }
 
 export const GradeView: React.FC<GradeViewProps> = ({
-  pset, subs, activeSub, draftParts, draftNotes, activePartId,
+  pset, subs, activeSub, draftParts, draftNotes, draftDirty, activePartId, batch,
   onBack, onSelectSub, onSetPartScore, onSetActivePartId, onSetNotes, onResetToAI,
-  onSubUpdated, onSubsRefresh, toast,
+  onSubUpdated, onSubsRefresh, onBatchStarted, onCancelBatch, onResumeBatch, onDismissBatch, toast,
 }) => {
   const [queueOpen, setQueueOpen]       = useState(true);   // open by default
   const [showImport, setShowImport]     = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showPrompt, setShowPrompt]     = useState(false);
   const [filter, setFilter]             = useState<'all' | 'unreviewed' | 'flagged'>('all');
-  const [grading, setGrading]           = useState(false);
+  const [gradingIds, setGradingIds]     = useState<number[]>([]);
   const [saving, setSaving]             = useState(false);
+
+  const batchActive = !!batch && ['queued', 'running', 'paused'].includes(batch.status);
+  const batchTerminal = !!batch && ['completed', 'failed', 'canceled'].includes(batch.status);
 
   // The rubric right panel is always visible when activeSub exists; no toggle needed.
   // activePartId drives which part's Popover is open in RubricPane.
@@ -95,63 +105,62 @@ export const GradeView: React.FC<GradeViewProps> = ({
     return true;
   }), [subs, filter]);
 
-  /* ── keyboard shortcuts ─────────────────────────────────────── */
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (showImport || showShortcuts) return;
-
-      if (e.key === '?')      { e.preventDefault(); setShowShortcuts(v => !v); return; }
-      if (e.key === 'Escape') { setShowShortcuts(false); return; }
-
-      if (e.key === 'j' || e.key === 'ArrowDown') {
-        e.preventDefault();
-        const idx = filtered.findIndex(s => s.id === activeSub?.id);
-        if (idx >= 0 && idx < filtered.length - 1) onSelectSub(filtered[idx + 1]);
-      }
-      if (e.key === 'k' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        const idx = filtered.findIndex(s => s.id === activeSub?.id);
-        if (idx > 0) onSelectSub(filtered[idx - 1]);
-      }
-      if (e.key.toLowerCase() === 'g' && activeSub) { e.preventDefault(); handleGrade(); }
-      if (e.key === 'Enter' && !e.shiftKey && draftParts.length) { e.preventDefault(); handleSaveAndNext(); }
-      if (e.altKey && ['0','1','2'].includes(e.key) && activePartId) {
-        e.preventDefault(); onSetPartScore(activePartId, Number(e.key));
-      }
-      if (!e.altKey && ['1','2','3','4','5','6'].includes(e.key) && draftParts[Number(e.key) - 1]) {
-        e.preventDefault(); onSetActivePartId(draftParts[Number(e.key) - 1].part_id);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSub, draftParts, activePartId, filtered, showImport, showShortcuts]);
-
   /* ── derived scores ─────────────────────────────────────────── */
   const effectiveScore = draftParts.reduce((s, p) => s + (p.teacher_score != null ? p.teacher_score : p.ai_score), 0);
   const aiScore        = activeSub?.result?.ai_total_score ?? activeSub?.ai_score ?? 0;
   const hasOverride    = draftParts.some(p => p.teacher_score != null && p.teacher_score !== p.ai_score);
+  const activeGrading  = !!activeSub && (gradingIds.includes(activeSub.id) || activeSub.status === 'grading' || activeSub.status === 'queued');
 
   /* ── handlers ───────────────────────────────────────────────── */
   const handleGrade = useCallback(async () => {
-    if (!activeSub || grading) return;
-    setGrading(true);
+    if (!activeSub || gradingIds.includes(activeSub.id) || saving) return;
+    const needsConfirm = activeSub.status === 'reviewed' || activeSub.status === 'needs_rereview';
+    if (needsConfirm && !confirm('该答卷已核定。重跑会保留教师分项与批注，但会标记为“待复核”。继续？')) return;
+    setGradingIds(ids => [...ids, activeSub.id]);
     try {
-      const updated = await api.gradeOne(activeSub.id);
+      const updated = await api.gradeOne(activeSub.id, needsConfirm);
       onSubUpdated(updated);
       toast(`${updated.student_name.trim()} AI 评阅完成`);
-    } catch (e: unknown) { toast(e instanceof Error ? e.message : '评阅失败'); }
-    finally { setGrading(false); }
-  }, [activeSub, grading, onSubUpdated, toast]);
+    } catch (e: unknown) {
+      toast(e instanceof Error ? e.message : '评阅失败');
+      onSubsRefresh().catch(() => undefined);
+    } finally {
+      setGradingIds(ids => ids.filter(id => id !== activeSub.id));
+    }
+  }, [activeSub, gradingIds, saving, onSubUpdated, onSubsRefresh, toast]);
 
   const handleGradeAll = async () => {
+    if (batchActive) { toast('已有批改任务在进行中，请查看顶部进度'); return; }
     try {
       const r = await api.gradeAll(pset.id, true);
-      if (r.queued === 0) toast('所有答卷已评阅完');
-      else { toast(`已加入队列：${r.queued} 份`); onSubsRefresh(); }
-    } catch (e: unknown) { toast(e instanceof Error ? e.message : '批量评阅失败'); }
+      if (r.task) {
+        onBatchStarted(r.task);
+        toast(r.reused ? '该题集已有批改任务，已接续显示进度' : `已创建批改任务：${r.queued} 份`);
+        onSubsRefresh().catch(() => undefined);
+      } else {
+        toast(r.skipped > 0 ? `没有待批改答卷（已跳过 ${r.skipped} 份已评/已核定）` : '没有可批改的答卷');
+      }
+    } catch (e: unknown) {
+      toast(e instanceof Error ? e.message : '批量评阅失败');
+    }
+  };
+
+  const handleCancelBatch = async () => {
+    if (!batch) return;
+    if (!confirm('确定取消当前批改任务？已完成的评分会保留。')) return;
+    try { await onCancelBatch(batch.id); toast('已取消批改任务'); }
+    catch (e: unknown) { toast(e instanceof Error ? e.message : '取消失败'); }
+  };
+
+  const handleResumeBatch = async () => {
+    if (!batch) return;
+    try { await onResumeBatch(batch.id); toast('已继续批改任务'); }
+    catch (e: unknown) { toast(e instanceof Error ? e.message : '继续失败'); }
+  };
+
+  const handleExport = async () => {
+    try { await api.downloadCSV(pset.id); }
+    catch (e: unknown) { toast(e instanceof Error ? e.message : '导出失败'); }
   };
 
   const handleSaveAndNext = async () => {
@@ -161,21 +170,88 @@ export const GradeView: React.FC<GradeViewProps> = ({
       const total = draftParts.reduce((s, p) => s + (p.teacher_score != null ? p.teacher_score : p.ai_score), 0);
       const saved = await api.reviewSubmission(activeSub.id, total, draftNotes, draftParts);
       onSubUpdated(saved);
-      onSubsRefresh();
-      const idx  = filtered.findIndex(s => s.id === saved.id);
-      const next = filtered.slice(idx + 1).find(s => s.status !== 'reviewed') || filtered[idx + 1];
+      const latest = await onSubsRefresh();
+      const idx = latest.findIndex(s => s.id === saved.id);
+      const next =
+        latest.slice(idx + 1).find(s => s.status !== 'reviewed' && s.status !== 'needs_rereview') ||
+        latest[idx + 1];
       if (next) onSelectSub(next);
       toast(`${saved.student_name.trim()} 核定 ${total} 分`);
-    } catch (e: unknown) { toast(e instanceof Error ? e.message : '保存失败'); }
-    finally { setSaving(false); }
+    } catch (e: unknown) {
+      toast(e instanceof Error ? e.message : '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const selectSub = (sub: Submission) => {
+    if (sub.id !== activeSub?.id && draftDirty &&
+        !confirm('当前答卷有未核定的改分/批注，切换后会丢失。继续？')) {
+      return;
+    }
+    onSelectSub(sub);
+  };
+
+  const handleBack = () => {
+    if (draftDirty && !confirm('当前答卷有未核定的改分/批注，返回题库会丢失。继续？')) return;
+    onBack();
   };
 
   const handleDelete = async (e: React.MouseEvent, id: number) => {
     e.stopPropagation();
     if (!confirm('确定移除这份答卷？')) return;
-    await api.deleteSubmission(id);
-    onSubsRefresh();
+    try {
+      await api.deleteSubmission(id);
+      await onSubsRefresh();
+      toast('已移除答卷');
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : '删除失败');
+    }
   };
+
+  /* ── keyboard shortcuts ─────────────────────────────────────── */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (showImport || showShortcuts) return;
+      const onButton = !!el?.closest('button, a, [role="button"]');
+      if (onButton && (e.key === 'Enter' || e.key === ' ')) return;
+
+      if (e.key === '?')      { e.preventDefault(); setShowShortcuts(v => !v); return; }
+      if (e.key === 'Escape') { setShowShortcuts(false); return; }
+
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'j' || e.key === 'ArrowDown')) {
+        e.preventDefault();
+        const idx = filtered.findIndex(s => s.id === activeSub?.id);
+        if (idx >= 0 && idx < filtered.length - 1) selectSub(filtered[idx + 1]);
+      }
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'k' || e.key === 'ArrowUp')) {
+        e.preventDefault();
+        const idx = filtered.findIndex(s => s.id === activeSub?.id);
+        if (idx > 0) selectSub(filtered[idx - 1]);
+      }
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'g' && activeSub) {
+        e.preventDefault();
+        if (!batchActive) handleGrade();
+      }
+      if (e.key === 'Enter' && !e.shiftKey && draftParts.length && activeSub) {
+        e.preventDefault();
+        if (!saving) handleSaveAndNext();
+      }
+      if (e.altKey && ['0', '1', '2'].includes(e.key) && activePartId) {
+        e.preventDefault(); onSetPartScore(activePartId, Number(e.key));
+      }
+      if (!e.altKey && ['1', '2', '3', '4', '5', '6'].includes(e.key) && draftParts[Number(e.key) - 1]) {
+        e.preventDefault(); onSetActivePartId(draftParts[Number(e.key) - 1].part_id);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSub, draftParts, activePartId, filtered, showImport, showShortcuts, draftDirty, saving, gradingIds, batchActive]);
+
 
   return (
     <div className="h-screen flex flex-col bg-[#F6F5F1] overflow-hidden">
@@ -183,7 +259,7 @@ export const GradeView: React.FC<GradeViewProps> = ({
       {/* ── header ──────────────────────────────────────────────── */}
       <header className="h-12 shrink-0 bg-white border-b border-[#E5E2DA] flex items-center justify-between px-4 gap-3">
         <div className="flex items-center gap-3 min-w-0">
-          <button onClick={onBack} className="p-1.5 rounded-lg hover:bg-[#F2F0EA] text-[#57544E]" title="返回题库">
+          <button onClick={handleBack} className="p-1.5 rounded-lg hover:bg-[#F2F0EA] text-[#57544E]" title="返回题库">
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div className="flex items-center gap-2 min-w-0">
@@ -204,22 +280,76 @@ export const GradeView: React.FC<GradeViewProps> = ({
           >题干</button>
           <button
             onClick={handleGradeAll}
-            disabled={subs.length === 0}
+            disabled={subs.length === 0 || batchActive}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-[#3F3D39] hover:bg-[#F2F0EA] disabled:opacity-40"
           >
             <Sparkles className="w-3.5 h-3.5 text-[#92400E]" /> 全班批改
           </button>
-          <a
-            href={api.exportCSVUrl(pset.id)}
+          <button
+            onClick={handleExport}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-[#3F3D39] hover:bg-[#F2F0EA]"
           >
             <FileSpreadsheet className="w-3.5 h-3.5" /> 导出
-          </a>
+          </button>
           <button onClick={() => setShowShortcuts(true)} className="p-1.5 rounded-lg text-[#57544E] hover:bg-[#F2F0EA]">
             <HelpCircle className="w-4 h-4" />
           </button>
         </div>
       </header>
+
+      {/* ── batch progress ─────────────────────────────────────── */}
+      {batch && (
+        <div className={`shrink-0 border-b px-4 py-2 flex items-center gap-3 text-xs ${
+          batch.status === 'paused' ? 'bg-[#FFFBEB] border-[#FDE68A]' :
+          batch.status === 'failed' ? 'bg-[#FFE4E6] border-[#FECDD3]' :
+          batchTerminal ? 'bg-[#F0FDF4] border-[#BBF7D0]' : 'bg-[#FAF9F5] border-[#E5E2DA]'
+        }`}>
+          {batchActive && <Loader2 className={`w-3.5 h-3.5 shrink-0 ${batch.status === 'running' ? 'animate-spin text-[#92400E]' : 'text-[#A39F96]'}`} />}
+          {batchTerminal && <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${batch.status === 'completed' ? 'text-[#15803D]' : 'text-[#9F1239]'}`} />}
+          <span className="font-medium text-[#191918] shrink-0">
+            {batch.status === 'queued' ? '排队中' :
+             batch.status === 'running' ? 'AI 批改中' :
+             batch.status === 'paused' ? '已暂停' :
+             batch.status === 'canceled' ? '已取消' :
+             batch.status === 'failed' ? '批改失败' :
+             `批改完成${batch.failed > 0 ? `（${batch.failed} 份失败）` : ''}`}
+          </span>
+          <div className="w-40 h-1.5 rounded-full bg-[#E5E2DA] overflow-hidden shrink-0">
+            <div
+              className={`h-full rounded-full transition-all ${batch.status === 'failed' ? 'bg-[#BE123C]' : batch.status === 'paused' ? 'bg-[#D97706]' : 'bg-[#1F4E3B]'}`}
+              style={{ width: `${batch.total ? Math.round(((batch.succeeded + batch.failed + batch.canceled) / batch.total) * 100) : 0}%` }}
+            />
+          </div>
+          <span className="tabular-nums text-[#57544E] shrink-0">
+            {batch.succeeded + batch.failed + batch.canceled}/{batch.total} · 成功 {batch.succeeded}
+            {batch.failed > 0 ? ` · 失败 ${batch.failed}` : ''}
+            {batch.canceled > 0 ? ` · 跳过 ${batch.canceled}` : ''}
+          </span>
+          {batch.current.length > 0 && (
+            <span className="truncate text-[#78756E]">
+              正在：{batch.current.slice(0, 3).map(i => i.student_name.trim()).filter(Boolean).join('、')}
+              {batch.current.length > 3 ? ` 等 ${batch.current.length} 人` : ''}
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-1.5 shrink-0">
+            {batch.status === 'paused' && (
+              <button onClick={handleResumeBatch} className="px-2 py-1 rounded-lg bg-[#191918] text-white text-[11px] font-medium">
+                继续批改
+              </button>
+            )}
+            {batchActive && (
+              <button onClick={handleCancelBatch} className="px-2 py-1 rounded-lg border border-[#DCD9D0] text-[11px] font-medium text-[#57544E] hover:bg-white">
+                取消
+              </button>
+            )}
+            {batchTerminal && (
+              <button onClick={onDismissBatch} className="px-2 py-1 rounded-lg border border-[#DCD9D0] text-[11px] font-medium text-[#57544E] hover:bg-white">
+                关闭
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── prompt drawer ───────────────────────────────────────── */}
       <AnimatePresence>
@@ -297,25 +427,31 @@ export const GradeView: React.FC<GradeViewProps> = ({
                     const sel  = s.id === activeSub?.id;
                     const sc   = s.final_score ?? s.ai_score;
                     const warn = s.result?.rubric_parts?.some(p => p.flags?.length);
-                    const dot  = s.status === 'error' ? 'bg-[#BE123C]' : warn ? 'bg-[#D97706]' : 'bg-[#B8B4AA]';
+                    const dot  = s.status === 'error' ? 'bg-[#BE123C]'
+                      : s.status === 'needs_rereview' ? 'bg-[#D97706]'
+                      : s.status === 'canceled' ? 'bg-[#A39F96]'
+                      : warn ? 'bg-[#D97706]' : 'bg-[#B8B4AA]';
                     return (
                       <div
                         key={s.id}
-                        onClick={() => onSelectSub(s)}
+                        onClick={() => selectSub(s)}
+                        title={s.status === 'needs_rereview' ? 'AI 已更新，待复核' : s.status}
                         className={`group flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition select-none ${
                           sel ? 'bg-[#F2EFE8]' : 'hover:bg-[#FAF9F5]'
                         }`}
                       >
                         {s.status === 'grading'
                           ? <Loader2 className="w-3.5 h-3.5 text-[#92400E] animate-spin shrink-0" />
-                          : s.status === 'reviewed'
-                            ? <CheckCircle2 className="w-3.5 h-3.5 text-[#15803D] shrink-0" />
-                            : <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
+                          : s.status === 'queued'
+                            ? <Loader2 className="w-3.5 h-3.5 text-[#A39F96] animate-pulse shrink-0" />
+                            : s.status === 'reviewed'
+                              ? <CheckCircle2 className="w-3.5 h-3.5 text-[#15803D] shrink-0" />
+                              : <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
                         }
                         <span className="text-xs font-medium truncate text-[#191918] flex-1 min-w-0">{s.student_name.trim()}</span>
                         {sc != null && (
                           <span className={`text-[11px] font-semibold tabular-nums shrink-0 ${s.status === 'reviewed' ? 'text-[#15803D]' : 'text-[#A39F96]'}`}>
-                            {sc}/7
+                            {sc}/{s.result?.max_total_score ?? 7}
                           </span>
                         )}
                         <button
@@ -342,7 +478,7 @@ export const GradeView: React.FC<GradeViewProps> = ({
                   </button>
                   <button
                     onClick={handleGradeAll}
-                    disabled={subs.length === 0}
+                    disabled={subs.length === 0 || batchActive}
                     className="w-full inline-flex items-center justify-center gap-1.5 py-2 rounded-lg border border-[#DCD9D0] text-xs font-medium text-[#3F3D39] hover:bg-[#FAF9F5] disabled:opacity-40"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-[#92400E]" /> 一键批改
@@ -381,7 +517,7 @@ export const GradeView: React.FC<GradeViewProps> = ({
               activePartId={activePartId}
               onSelectPart={onSetActivePartId}
               onGrade={handleGrade}
-              grading={grading || activeSub.status === 'grading'}
+              grading={activeGrading}
             />
           ) : (
             <div className="h-full flex flex-col items-center justify-center text-center gap-3">
@@ -409,7 +545,7 @@ export const GradeView: React.FC<GradeViewProps> = ({
               aiScore={aiScore}
               hasOverride={hasOverride}
               saving={saving}
-              grading={grading}
+              grading={activeGrading}
               onSelectPart={onSetActivePartId}
               onSetScore={onSetPartScore}
               onReset={onResetToAI}
@@ -427,7 +563,11 @@ export const GradeView: React.FC<GradeViewProps> = ({
           psetId={pset.id}
           psetTitle={pset.title}
           onClose={() => setShowImport(false)}
-          onDone={() => { setShowImport(false); onSubsRefresh(); }}
+          onDone={(task) => {
+            setShowImport(false);
+            if (task) onBatchStarted(task);
+            onSubsRefresh().catch(() => undefined);
+          }}
         />
       )}
       {showShortcuts && <ShortcutsModal onClose={() => setShowShortcuts(false)} />}
@@ -554,6 +694,26 @@ const PaperPane: React.FC<{
         </div>
       </div>
 
+      {/* status banners (visible even when an old result exists) */}
+      {sub.status === 'error' && sub.error_msg && (
+        <div className="mb-5 flex items-start gap-2 text-xs text-[#9F1239] bg-[#FFE4E6] rounded-xl px-3 py-2">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span className="flex-1 leading-relaxed">{sub.error_msg}</span>
+          <button onClick={onGrade} disabled={grading} className="font-medium underline shrink-0 disabled:opacity-50">重试</button>
+        </div>
+      )}
+      {sub.status === 'needs_rereview' && (
+        <div className="mb-5 flex items-start gap-2 text-xs text-[#92400E] bg-[#FEF3C7] rounded-xl px-3 py-2">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span className="leading-relaxed">AI 结果已更新；教师逐项分与批注仍保留。请检查后重新「核定」。</span>
+        </div>
+      )}
+      {sub.status === 'queued' && (
+        <div className="mb-5 flex items-center gap-2 text-xs text-[#57544E] bg-[#F2F0EA] rounded-xl px-3 py-2">
+          <Loader2 className="w-3.5 h-3.5 animate-pulse" /> 已排队，等待 AI 批改 worker 领取。
+        </div>
+      )}
+
       {/* colour legend */}
       {result && (
         <div className="flex flex-wrap items-center gap-3 mb-5 text-[11px] text-[#78756E]">
@@ -605,9 +765,6 @@ const PaperPane: React.FC<{
             {grading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4 text-[#FCD34D]" />}
             {grading ? 'AI 评阅中…' : '运行 AI 评阅'}
           </button>
-          {sub.error_msg && (
-            <div className="text-xs text-[#9F1239] bg-[#FFE4E6] rounded-xl px-3 py-2">{sub.error_msg}</div>
-          )}
         </div>
       )}
 
@@ -755,6 +912,7 @@ const RubricPane: React.FC<{
   const [popover, setPopover] = useState<string | null>(null);
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const maxTotal = parts.reduce((sum, p) => sum + p.max_score, 0) || 7;
 
   const openPopover = (partId: string) => {
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
@@ -778,7 +936,7 @@ const RubricPane: React.FC<{
             <span className="text-2xl font-semibold tabular-nums text-[#191918]">
               {parts.length ? effectiveScore : '—'}
             </span>
-            <span className="text-xs text-[#A39F96]">/ 7</span>
+            <span className="text-xs text-[#A39F96]">/ {maxTotal}</span>
             {hasOverride && (
               <span className="text-[10px] text-[#92400E] ml-1">AI {aiScore}</span>
             )}
@@ -902,7 +1060,7 @@ const RubricPane: React.FC<{
    ImportModal
    ══════════════════════════════════════════════════════════════════ */
 const ImportModal: React.FC<{
-  psetId: number; psetTitle: string; onClose: () => void; onDone: () => void;
+  psetId: number; psetTitle: string; onClose: () => void; onDone: (task?: GradingTask) => void;
 }> = ({ psetId, psetTitle, onClose, onDone }) => {
   const [file,       setFile]      = useState<File | null>(null);
   const [mode,       setMode]      = useState<'auto' | 'pages_per_student'>('auto');
@@ -913,14 +1071,21 @@ const ImportModal: React.FC<{
   const [autoGrade,  setAutoGrade] = useState(true);
   const [busy,       setBusy]      = useState(false);
   const [err,        setErr]       = useState('');
+  const parseSeq = useRef(0);
 
   const parsePdf = async (f: File, m = mode, p = pps) => {
+    const seq = ++parseSeq.current;
     setBusy(true); setErr('');
     try {
       const r = await api.parsePDF(psetId, f, m, p);
+      if (seq !== parseSeq.current) return;
       setPages(r.page_count); setSegs(r.segments || []);
-    } catch (e: unknown) { setErr(e instanceof Error ? e.message : '解析失败'); }
-    finally { setBusy(false); }
+    } catch (e: unknown) {
+      if (seq !== parseSeq.current) return;
+      setErr(e instanceof Error ? e.message : '解析失败');
+    } finally {
+      if (seq === parseSeq.current) setBusy(false);
+    }
   };
 
   const onFile = (f: File | null) => { setFile(f); if (f) parsePdf(f); };
@@ -982,8 +1147,9 @@ const ImportModal: React.FC<{
     if (final.length === 0) { setErr('没有可导入的答卷'); return; }
     setBusy(true); setErr('');
     try {
-      await api.importSubmissions(psetId, final, autoGrade);
-      onDone();
+      const res = await api.importSubmissions(psetId, final, autoGrade);
+      if (res.task_error) setErr(`答卷已导入，但批改任务创建失败：${res.task_error}`);
+      onDone(res.task);
     } catch (e: unknown) { setErr(e instanceof Error ? e.message : '导入失败'); }
     finally { setBusy(false); }
   };

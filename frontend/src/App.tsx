@@ -1,27 +1,18 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
 import {
   BookOpen,
-  CheckCircle2,
   ChevronRight,
-  Download,
-  FileSpreadsheet,
-  FilePlus2,
-  FolderOpen,
-  HelpCircle,
-  Keyboard,
   Loader2,
   Lock,
   Plus,
-  RefreshCw,
   Settings,
-  Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
-import { api, getAuthToken, setAuthToken } from './api';
+import { api, setAuthToken, setUnauthorizedHandler } from './api';
 import type {
   AppSettings,
+  GradingTask,
   ProblemSet,
   RubricPartScore,
   Submission,
@@ -39,15 +30,18 @@ interface State {
   activeSubId: number | null;
   draftParts: RubricPartScore[];
   draftNotes: string;
+  draftDirty: boolean;
   activePartId: string | null;
+  batch: GradingTask | null;
   toast: string | null;
-  busy: boolean;
 }
 type Action =
   | { type: 'SET_PAGE'; page: Page }
   | { type: 'SET_SETTINGS'; settings: AppSettings }
   | { type: 'SET_PSETS'; psets: ProblemSet[] }
   | { type: 'OPEN_PSET'; pset: ProblemSet; subs: Submission[] }
+  | { type: 'SET_ACTIVE_PSET'; pset: ProblemSet }
+  | { type: 'REFRESH_SUBS'; subs: Submission[] }
   | { type: 'SET_SUBS'; subs: Submission[] }
   | { type: 'SELECT_SUB'; sub: Submission }
   | { type: 'SET_DRAFT_PARTS'; parts: RubricPartScore[] }
@@ -56,8 +50,9 @@ type Action =
   | { type: 'SET_PART_SCORE'; partId: string; score: number }
   | { type: 'RESET_PARTS_TO_AI' }
   | { type: 'UPDATE_SUB'; sub: Submission }
-  | { type: 'TOAST'; msg: string | null }
-  | { type: 'SET_BUSY'; v: boolean };
+  | { type: 'SET_BATCH'; batch: GradingTask }
+  | { type: 'CLEAR_BATCH' }
+  | { type: 'TOAST'; msg: string | null };
 
 const init: State = {
   page: 'login',
@@ -68,36 +63,112 @@ const init: State = {
   activeSubId: null,
   draftParts: [],
   draftNotes: '',
+  draftDirty: false,
   activePartId: null,
+  batch: null,
   toast: null,
-  busy: false,
 };
+
+function draftOf(sub: Submission | undefined | null): RubricPartScore[] {
+  return sub?.result?.rubric_parts?.map(p => ({ ...p })) ?? [];
+}
 
 function reducer(s: State, a: Action): State {
   switch (a.type) {
     case 'SET_PAGE': return { ...s, page: a.page };
     case 'SET_SETTINGS': return { ...s, settings: a.settings };
     case 'SET_PSETS': return { ...s, psets: a.psets };
-    case 'OPEN_PSET': return { ...s, page: 'grade', activePset: a.pset, subs: a.subs, activeSubId: a.subs[0]?.id ?? null };
-    case 'SET_SUBS': return { ...s, subs: a.subs };
-    case 'SELECT_SUB': {
-      const parts = a.sub.result?.rubric_parts?.map(p => ({ ...p })) ?? [];
-      return { ...s, activeSubId: a.sub.id, draftParts: parts, draftNotes: a.sub.teacher_notes || '', activePartId: parts[0]?.part_id ?? null };
+    case 'OPEN_PSET': {
+      const first = a.subs[0];
+      const parts = draftOf(first);
+      return {
+        ...s,
+        page: 'grade',
+        activePset: a.pset,
+        subs: a.subs,
+        activeSubId: first?.id ?? null,
+        draftParts: parts,
+        draftNotes: first?.teacher_notes || '',
+        draftDirty: false,
+        activePartId: parts[0]?.part_id ?? null,
+      };
     }
-    case 'SET_DRAFT_PARTS': return { ...s, draftParts: a.parts };
-    case 'SET_DRAFT_NOTES': return { ...s, draftNotes: a.notes };
+    case 'SET_ACTIVE_PSET':
+      return { ...s, activePset: a.pset };
+    case 'REFRESH_SUBS':
+    case 'SET_SUBS': {
+      const active = a.subs.find(x => x.id === s.activeSubId);
+      if (active && !s.draftDirty) {
+        const parts = draftOf(active);
+        return {
+          ...s,
+          subs: a.subs,
+          draftParts: parts,
+          draftNotes: active.teacher_notes || '',
+          activePartId: parts[0]?.part_id ?? s.activePartId,
+        };
+      }
+      if (!active && a.subs.length > 0) {
+        const first = a.subs[0];
+        const parts = draftOf(first);
+        return {
+          ...s,
+          subs: a.subs,
+          activeSubId: first.id,
+          draftParts: parts,
+          draftNotes: first.teacher_notes || '',
+          draftDirty: false,
+          activePartId: parts[0]?.part_id ?? null,
+        };
+      }
+      return { ...s, subs: a.subs };
+    }
+    case 'SELECT_SUB': {
+      const parts = draftOf(a.sub);
+      return {
+        ...s,
+        activeSubId: a.sub.id,
+        draftParts: parts,
+        draftNotes: a.sub.teacher_notes || '',
+        draftDirty: false,
+        activePartId: parts[0]?.part_id ?? null,
+      };
+    }
+    case 'SET_DRAFT_PARTS': return { ...s, draftParts: a.parts, draftDirty: true };
+    case 'SET_DRAFT_NOTES': return { ...s, draftNotes: a.notes, draftDirty: true };
     case 'SET_ACTIVE_PART': return { ...s, activePartId: a.partId };
     case 'SET_PART_SCORE':
-      return { ...s, draftParts: s.draftParts.map(p => p.part_id === a.partId ? { ...p, teacher_score: Math.max(0, Math.min(p.max_score, a.score)) } : p) };
+      return {
+        ...s,
+        draftDirty: true,
+        draftParts: s.draftParts.map(p =>
+          p.part_id === a.partId
+            ? { ...p, teacher_score: Math.max(0, Math.min(p.max_score, a.score)) }
+            : p
+        ),
+      };
     case 'RESET_PARTS_TO_AI':
-      return { ...s, draftParts: s.draftParts.map(p => ({ ...p, teacher_score: null })) };
+      return {
+        ...s,
+        draftDirty: false,
+        draftParts: s.draftParts.map(p => ({ ...p, teacher_score: null })),
+      };
     case 'UPDATE_SUB': {
-      const subs = s.subs.map(x => x.id === a.sub.id ? a.sub : x);
-      const parts = a.sub.result?.rubric_parts?.map(p => ({ ...p })) ?? s.draftParts;
-      return { ...s, subs, draftParts: s.activeSubId === a.sub.id ? parts : s.draftParts };
+      const subs = s.subs.map(x => (x.id === a.sub.id ? a.sub : x));
+      if (s.activeSubId !== a.sub.id) return { ...s, subs };
+      const parts = draftOf(a.sub);
+      return {
+        ...s,
+        subs,
+        draftParts: parts,
+        draftNotes: a.sub.teacher_notes || '',
+        draftDirty: false,
+        activePartId: parts[0]?.part_id ?? s.activePartId,
+      };
     }
+    case 'SET_BATCH': return { ...s, batch: a.batch };
+    case 'CLEAR_BATCH': return { ...s, batch: null };
     case 'TOAST': return { ...s, toast: a.msg };
-    case 'SET_BUSY': return { ...s, busy: a.v };
   }
 }
 
@@ -110,6 +181,14 @@ export const App: React.FC = () => {
     dispatch({ type: 'TOAST', msg });
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => dispatch({ type: 'TOAST', msg: null }), 2600);
+  }, []);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setAuthToken('');
+      dispatch({ type: 'SET_PAGE', page: 'login' });
+    });
+    return () => setUnauthorizedHandler(null);
   }, []);
 
   /* Boot: check auth then load library */
@@ -131,22 +210,73 @@ export const App: React.FC = () => {
     })();
   }, []);
 
-  /* Auto-poll while any sub is grading */
+  /* Poll the explicit task object while it is active. */
+  const batchId = st.batch?.id;
+  const batchStatus = st.batch?.status;
+  const activePsetId = st.activePset?.id;
   useEffect(() => {
-    if (!st.activePset || !st.subs.some(s => s.status === 'grading')) return;
-    const t = setInterval(async () => {
-      const subs = await api.listSubmissions(st.activePset!.id);
-      dispatch({ type: 'SET_SUBS', subs });
-      const psets = await api.listProblemSets();
-      dispatch({ type: 'SET_PSETS', psets });
-    }, 2000);
-    return () => clearInterval(t);
-  }, [st.activePset, st.subs]);
+    if (!batchId || !batchStatus || !['queued', 'running'].includes(batchStatus)) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
+    let ticks = 0;
+    const tick = async () => {
+      if (cancelled) return;
+      ticks++;
+      try {
+        const task = await api.getTask(batchId);
+        if (cancelled) return;
+        dispatch({ type: 'SET_BATCH', batch: task });
+        const terminal = ['completed', 'failed', 'canceled'].includes(task.status);
+        const samePset = task.problem_set_id === activePsetId;
+        if (samePset && (ticks % 2 === 0 || terminal)) {
+          const subs = await api.listSubmissions(task.problem_set_id);
+          if (cancelled) return;
+          dispatch({ type: 'REFRESH_SUBS', subs });
+          const psets = await api.listProblemSets();
+          if (cancelled) return;
+          dispatch({ type: 'SET_PSETS', psets });
+          const updated = psets.find(p => p.id === task.problem_set_id);
+          if (updated) dispatch({ type: 'SET_ACTIVE_PSET', pset: updated });
+        }
+        failures = 0;
+        if (terminal) return;
+      } catch {
+        failures++;
+        if (failures >= 3) {
+          toast('进度刷新失败，请检查网络后刷新页面');
+          return;
+        }
+      }
+      if (!cancelled) timer = setTimeout(tick, 1500);
+    };
+    timer = setTimeout(tick, 250);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [batchId, batchStatus, activePsetId, toast]);
 
   const openPset = async (ps: ProblemSet) => {
-    const subs = await api.listSubmissions(ps.id);
+    const [subs, active] = await Promise.all([
+      api.listSubmissions(ps.id),
+      api.getActiveTask(ps.id).catch(() => ({ task: null as GradingTask | null })),
+    ]);
     dispatch({ type: 'OPEN_PSET', pset: ps, subs });
+    if (active.task) dispatch({ type: 'SET_BATCH', batch: active.task });
   };
+
+  const refreshSubs = useCallback(async (): Promise<Submission[]> => {
+    const pset = st.activePset;
+    if (!pset) return [];
+    const subs = await api.listSubmissions(pset.id);
+    dispatch({ type: 'REFRESH_SUBS', subs });
+    const psets = await api.listProblemSets();
+    dispatch({ type: 'SET_PSETS', psets });
+    const updated = psets.find(p => p.id === pset.id);
+    if (updated) dispatch({ type: 'SET_ACTIVE_PSET', pset: updated });
+    return subs;
+  }, [st.activePset]);
 
   const activeSub = st.subs.find(s => s.id === st.activeSubId) ?? null;
 
@@ -162,6 +292,7 @@ export const App: React.FC = () => {
     <LibraryPage
       psets={st.psets}
       settings={st.settings}
+      batch={st.batch}
       onOpen={openPset}
       onPsetsChange={async () => {
         const psets = await api.listProblemSets();
@@ -178,7 +309,9 @@ export const App: React.FC = () => {
       activeSub={activeSub}
       draftParts={st.draftParts}
       draftNotes={st.draftNotes}
+      draftDirty={st.draftDirty}
       activePartId={st.activePartId}
+      batch={st.batch?.problem_set_id === st.activePset?.id ? st.batch : null}
       onBack={() => dispatch({ type: 'SET_PAGE', page: 'library' })}
       onSelectSub={sub => dispatch({ type: 'SELECT_SUB', sub })}
       onSetPartScore={(partId, score) => dispatch({ type: 'SET_PART_SCORE', partId, score })}
@@ -186,14 +319,17 @@ export const App: React.FC = () => {
       onSetNotes={notes => dispatch({ type: 'SET_DRAFT_NOTES', notes })}
       onResetToAI={() => dispatch({ type: 'RESET_PARTS_TO_AI' })}
       onSubUpdated={sub => dispatch({ type: 'UPDATE_SUB', sub })}
-      onSubsRefresh={async () => {
-        const subs = await api.listSubmissions(st.activePset!.id);
-        dispatch({ type: 'SET_SUBS', subs });
-        const psets = await api.listProblemSets();
-        dispatch({ type: 'SET_PSETS', psets });
-        const updated = psets.find(p => p.id === st.activePset!.id);
-        if (updated) dispatch({ type: 'OPEN_PSET', pset: updated, subs });
+      onSubsRefresh={refreshSubs}
+      onBatchStarted={task => dispatch({ type: 'SET_BATCH', batch: task })}
+      onCancelBatch={async id => {
+        const task = await api.cancelTask(id);
+        dispatch({ type: 'SET_BATCH', batch: task });
       }}
+      onResumeBatch={async id => {
+        const task = await api.resumeTask(id);
+        dispatch({ type: 'SET_BATCH', batch: task });
+      }}
+      onDismissBatch={() => dispatch({ type: 'CLEAR_BATCH' })}
       toast={toast}
     />
   );
@@ -255,13 +391,15 @@ const LoginPage: React.FC<{ onDone: () => void }> = ({ onDone }) => {
 const LibraryPage: React.FC<{
   psets: ProblemSet[];
   settings: AppSettings | null;
+  batch: GradingTask | null;
   onOpen: (ps: ProblemSet) => void;
   onPsetsChange: () => void;
   onSettingsChange: (s: AppSettings) => void;
-}> = ({ psets, settings, onOpen, onPsetsChange, onSettingsChange }) => {
+}> = ({ psets, settings, batch, onOpen, onPsetsChange, onSettingsChange }) => {
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [editTarget, setEditTarget] = useState<ProblemSet | null>(null);
+  const batchActive = !!batch && ['queued', 'running', 'paused'].includes(batch.status);
 
   return (
     <div className="min-h-screen bg-[#F6F5F1] flex flex-col">
@@ -273,6 +411,12 @@ const LibraryPage: React.FC<{
           <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F2F0EA] text-[#6E6B65]">题库</span>
         </div>
         <div className="flex items-center gap-2">
+          {batchActive && (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#FEF3C7] text-[#92400E] text-[11px] font-medium">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              批改 {batch!.succeeded + batch!.failed + batch!.canceled}/{batch!.total}
+            </span>
+          )}
           <button
             onClick={() => setShowSettings(true)}
             className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition ${
@@ -545,9 +689,13 @@ const SettingsModal: React.FC<{
   const [saving, setSaving] = useState(false);
 
   const test = async () => {
+    if (!apiKey.trim()) {
+      setTestMsg({ ok: false, text: '测试连接需要先填写 API Key（不会使用已保存的 Key）' });
+      return;
+    }
     setTesting(true); setTestMsg(null);
     try {
-      const r = await api.testLLM({ api_base_url: baseUrl, api_key: apiKey || undefined, model });
+      const r = await api.testLLM({ api_base_url: baseUrl, api_key: apiKey.trim(), model });
       setTestMsg({ ok: true, text: `连通 (${r.model})：${r.reply}` });
     } catch (e: unknown) {
       setTestMsg({ ok: false, text: e instanceof Error ? e.message : '失败' });
@@ -592,7 +740,7 @@ const SettingsModal: React.FC<{
             </div>
             <div>
               <label className="block font-medium text-[#3F3D39] mb-1">并发数</label>
-              <input type="number" min={1} max={12} value={concurrency} onChange={e => setConcurrency(Number(e.target.value) || 4)} className="w-full rounded-xl border border-[#DCD9D0] bg-white px-3 py-2" />
+              <input type="number" min={1} max={16} value={concurrency} onChange={e => setConcurrency(Number(e.target.value) || 4)} className="w-full rounded-xl border border-[#DCD9D0] bg-white px-3 py-2" />
             </div>
           </div>
           <label className="flex items-center justify-between p-3 rounded-xl bg-[#FAF9F6] border border-[#E5E2DA] cursor-pointer">

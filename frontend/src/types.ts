@@ -48,6 +48,7 @@ export interface Annotation {
   part_id: string;
   badge: string;
   comment_zh: string;
+  flags?: string[];
   concept_check?: ConceptCheck;
 }
 
@@ -85,7 +86,15 @@ export interface Submission {
   student_code: string;
   page_range: string;
   raw_text: string;
-  status: 'pending' | 'grading' | 'ai_graded' | 'reviewed' | 'error';
+  status:
+    | 'pending'
+    | 'queued'
+    | 'grading'
+    | 'ai_graded'
+    | 'needs_rereview'
+    | 'reviewed'
+    | 'error'
+    | 'canceled';
   ai_score?: number | null;
   final_score?: number | null;
   result?: GradingResult;
@@ -93,6 +102,32 @@ export interface Submission {
   error_msg?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface TaskItem {
+  task_id: number;
+  submission_id: number;
+  student_name: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'superseded';
+  error_msg?: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
+export interface GradingTask {
+  id: number;
+  problem_set_id: number;
+  status: 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'canceled';
+  total: number;
+  succeeded: number;
+  failed: number;
+  canceled: number;
+  source: string;
+  error_summary?: string;
+  current: TaskItem[];
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
 }
 
 export interface SplitSegment {

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +47,7 @@ type dsRequest struct {
 	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 	ResponseFormat  *dsRespFormat `json:"response_format,omitempty"`
 	Temperature     *float64      `json:"temperature,omitempty"`
+	MaxTokens       int           `json:"max_tokens,omitempty"`
 	Stream          bool          `json:"stream"`
 }
 
@@ -64,9 +67,47 @@ type llmParsedOutput struct {
 		ID string `json:"id"`
 		Zh string `json:"zh"`
 	} `json:"translations"`
-	Annotations []models.Annotation      `json:"annotations"`
-	RubricParts []models.RubricPartScore `json:"rubric_parts"`
-	SummaryZh   string                   `json:"summary_zh"`
+	Annotations []models.Annotation `json:"annotations"`
+	RubricParts []llmRubricPart     `json:"rubric_parts"`
+	SummaryZh   string              `json:"summary_zh"`
+}
+
+// flexInt tolerates 1, 1.0 and "1" from the model instead of failing the whole
+// submission on a non-integer score.
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" {
+		*f = 0
+		return nil
+	}
+	if strings.HasPrefix(s, `"`) {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		s = strings.TrimSpace(str)
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return fmt.Errorf("invalid score %q: %w", s, err)
+	}
+	*f = flexInt(int(math.Round(v)))
+	return nil
+}
+
+type llmRubricPart struct {
+	PartID         string   `json:"part_id"`
+	Label          string   `json:"label"`
+	Subtitle       string   `json:"subtitle"`
+	MaxScore       flexInt  `json:"max_score"`
+	AIScore        flexInt  `json:"ai_score"`
+	CitedSource    string   `json:"cited_source"`
+	AppliedConcept string   `json:"applied_concept"`
+	ReasonZh       string   `json:"reason_zh"`
+	EvidenceQuote  string   `json:"evidence_quote"`
+	Flags          []string `json:"flags"`
 }
 
 func BuildChatCompletionsURL(baseURL string) string {
@@ -142,6 +183,9 @@ func GradeSubmission(ctx context.Context, cfg DeepSeekConfig, ps models.ProblemS
 	}
 
 	if strings.TrimSpace(cfg.APIKey) == "" {
+		if strings.ToUpper(ps.QuestionType) == "AAQ" {
+			return nil, fmt.Errorf("AAQ 评分需要配置 DeepSeek API Key")
+		}
 		res := HeuristicOfflineGrade(ps, sentences)
 		return EnforceOfficialRules(ps, res), nil
 	}
@@ -159,6 +203,7 @@ func GradeSubmission(ctx context.Context, cfg DeepSeekConfig, ps models.ProblemS
 			{Role: "user", Content: usrPrompt},
 		},
 		ResponseFormat: &dsRespFormat{Type: "json_object"},
+		MaxTokens:      8192,
 		Stream:         false,
 	}
 
@@ -186,25 +231,9 @@ func GradeSubmission(ctx context.Context, cfg DeepSeekConfig, ps models.ProblemS
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, BuildChatCompletionsURL(cfg.BaseURL), bytes.NewReader(payload))
+	respBytes, err := doChatRequest(ctx, cfg, payload)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 150 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("DeepSeek 请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("DeepSeek HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBytes)))
 	}
 
 	var dsResp dsResponse
@@ -214,11 +243,31 @@ func GradeSubmission(ctx context.Context, cfg DeepSeekConfig, ps models.ProblemS
 	if len(dsResp.Choices) == 0 {
 		return nil, fmt.Errorf("模型未返回候选结果")
 	}
+	if strings.EqualFold(dsResp.Choices[0].FinishReason, "length") {
+		return nil, fmt.Errorf("模型输出被截断（finish_reason=length），请降低 thinking/推理强度后重试")
+	}
 
 	content := cleanJSONFence(dsResp.Choices[0].Message.Content)
 	var out llmParsedOutput
 	if err := json.Unmarshal([]byte(content), &out); err != nil {
 		return nil, fmt.Errorf("模型输出 JSON 解析失败: %w (raw: %.200s)", err, content)
+	}
+
+	incoming := make([]models.RubricPartScore, 0, len(out.RubricParts))
+	for _, p := range out.RubricParts {
+		incoming = append(incoming, models.RubricPartScore{
+			PartID:         strings.TrimSpace(p.PartID),
+			MaxScore:       int(p.MaxScore),
+			AIScore:        int(p.AIScore),
+			CitedSource:    p.CitedSource,
+			AppliedConcept: p.AppliedConcept,
+			ReasonZh:       p.ReasonZh,
+			EvidenceQuote:  p.EvidenceQuote,
+			Flags:          p.Flags,
+		})
+	}
+	if missing := missingTemplateParts(ps.QuestionType, incoming); len(missing) > 0 {
+		return nil, fmt.Errorf("模型输出缺少采分项：%s，请重试或改用更稳定的模型", strings.Join(missing, ", "))
 	}
 
 	zhMap := make(map[string]string, len(out.Translations))
@@ -235,14 +284,104 @@ func GradeSubmission(ctx context.Context, cfg DeepSeekConfig, ps models.ProblemS
 
 	res := &models.GradingResult{
 		Sentences:      sentences,
-		Annotations:    out.Annotations,
-		RubricParts:    mergeWithTemplate(ps.QuestionType, out.RubricParts),
+		Annotations:    validateAnnotations(out.Annotations, sentences),
+		RubricParts:    mergeWithTemplate(ps.QuestionType, incoming),
 		SummaryZh:      out.SummaryZh,
 		GraderMode:     "deepseek",
 		ModelUsed:      model,
 		ReasoningTrace: strings.TrimSpace(dsResp.Choices[0].Message.ReasoningContent),
 	}
 	return EnforceOfficialRules(ps, res), nil
+}
+
+func doChatRequest(ctx context.Context, cfg DeepSeekConfig, payload []byte) ([]byte, error) {
+	client := &http.Client{Timeout: 150 * time.Second}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(1<<uint(attempt-1)) * time.Second
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, BuildChatCompletionsURL(cfg.BaseURL), bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cfg.APIKey))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("DeepSeek 请求失败: %w", err)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("DeepSeek HTTP %d: %.300s", resp.StatusCode, strings.TrimSpace(string(body)))
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("DeepSeek HTTP %d: %.300s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return body, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("DeepSeek 请求失败")
+	}
+	return nil, lastErr
+}
+
+func missingTemplateParts(qType string, incoming []models.RubricPartScore) []string {
+	tmpl := DefaultEBQRubricTemplate()
+	if strings.ToUpper(qType) == "AAQ" {
+		tmpl = DefaultAAQRubricTemplate()
+	}
+	have := make(map[string]bool, len(incoming))
+	for _, p := range incoming {
+		have[strings.ToLower(strings.TrimSpace(p.PartID))] = true
+	}
+	var missing []string
+	for _, p := range tmpl {
+		if !have[p.PartID] {
+			missing = append(missing, p.PartID)
+		}
+	}
+	return missing
+}
+
+func validateAnnotations(in []models.Annotation, sentences []models.SentencePair) []models.Annotation {
+	byID := make(map[string]models.SentencePair, len(sentences))
+	for _, s := range sentences {
+		byID[s.ID] = s
+	}
+	out := make([]models.Annotation, 0, len(in))
+	for i := range in {
+		a := in[i]
+		sent, ok := byID[a.SentenceID]
+		if !ok {
+			continue
+		}
+		if a.ID == "" {
+			a.ID = fmt.Sprintf("A%d", len(out)+1)
+		}
+		q := strings.TrimSpace(a.ExactQuote)
+		if q != "" && !strings.Contains(strings.ToLower(sent.En), strings.ToLower(q)) {
+			a.Flags = appendUnique(a.Flags, "unverified_quote")
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func cleanJSONFence(s string) string {
@@ -437,8 +576,12 @@ func HeuristicOfflineGrade(ps models.ProblemSet, sentences []models.SentencePair
 		}
 
 		lowerEn := strings.ToLower(en)
+		seenConcept := make(map[string]bool)
 		for idx := range ced.Catalog {
 			c := &ced.Catalog[idx]
+			if seenConcept[c.Term] {
+				continue
+			}
 			matchedAlias := ""
 			if strings.Contains(lowerEn, strings.ToLower(c.Term)) {
 				matchedAlias = c.Term
@@ -451,6 +594,7 @@ func HeuristicOfflineGrade(ps models.ProblemSet, sentences []models.SentencePair
 				}
 			}
 			if matchedAlias != "" {
+				seenConcept[c.Term] = true
 				_, banned := ced.MatchConcept(matchedAlias, ps.IneligibleConcepts)
 				foundConcepts = append(foundConcepts, struct {
 					sentID string
@@ -480,7 +624,6 @@ func HeuristicOfflineGrade(ps models.ProblemSet, sentences []models.SentencePair
 						NoteZh:          c.Definition,
 					},
 				})
-				break
 			}
 		}
 	}
