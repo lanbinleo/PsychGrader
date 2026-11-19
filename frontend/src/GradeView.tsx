@@ -39,15 +39,22 @@ const CAT_STYLE: Record<AnnotationCategory, { bg: string; ring: string; dot: str
 };
 
 const FLAG_LABELS: Record<string, { text: string; tone: 'err' | 'warn' }> = {
-  missing_citation:     { text: '漏标 Source 出处',   tone: 'err'  },
-  wrong_source:         { text: 'Source 编号标错',    tone: 'err'  },
-  duplicate_source:     { text: '与 B 段同源冲突',   tone: 'err'  },
-  duplicate_concept:    { text: '与 B 段概念重复',   tone: 'err'  },
-  ineligible_concept:   { text: '误踩题干禁用词',    tone: 'err'  },
-  definition_only:      { text: '纯背定义未结合材料', tone: 'warn' },
-  direction_reversed:   { text: '实验结果方向说反',  tone: 'err'  },
-  self_contradiction:   { text: '前后自相矛盾',      tone: 'err'  },
-  oversimplified_claim: { text: '主张空泛',          tone: 'warn' },
+  missing_citation:      { text: '漏标 Source 出处',     tone: 'err'  },
+  wrong_source:          { text: 'Source 编号标错',      tone: 'err'  },
+  duplicate_source:      { text: '与 B 段同源冲突',      tone: 'err'  },
+  duplicate_concept:     { text: '与 B 段概念重复',      tone: 'err'  },
+  ineligible_concept:    { text: '误踩题干禁用词',       tone: 'err'  },
+  misapplied_concept:    { text: '概念运用不当',         tone: 'err'  },
+  inaccurate_explanation:{ text: '解释不准确',           tone: 'warn' },
+  definition_only:       { text: '纯背定义未结合材料',   tone: 'warn' },
+  direction_reversed:    { text: '实验结果方向说反',     tone: 'err'  },
+  self_contradiction:    { text: '前后自相矛盾',         tone: 'err'  },
+  oversimplified_claim:  { text: '主张空泛',             tone: 'warn' },
+  vague_claim:           { text: '主张空泛',             tone: 'warn' },
+  unsupported_claim:     { text: '主张缺乏证据支撑',     tone: 'warn' },
+  implicit_claim_rescued:{ text: '隐含 Claim 救济生效',  tone: 'warn' },
+  unverified_quote:      { text: '引文未在原句中找到',   tone: 'warn' },
+  missing_part:          { text: '模型缺少采分项',       tone: 'err'  },
 };
 
 /* ══════════════════════════════════════════════════════════════════
@@ -654,7 +661,11 @@ const PaperPane: React.FC<{
         <mark
           key={`h${sp.ann.id}`}
           onClick={e => { e.stopPropagation(); onSelectPart(sp.ann.part_id); }}
-          className={`cursor-pointer rounded-[2px] transition-all ${st.bg} ${focused ? st.ring : ''}`}
+          className={`cursor-pointer rounded-[2px] transition-all ${st.bg} ${
+            focused
+              ? `${st.ring} outline outline-2 outline-offset-2 outline-[#D97706]/45 shadow-[0_0_0_3px_rgba(217,119,6,0.16)] relative z-10`
+              : ''
+          }`}
           style={{ padding: '0 1px' }}
         >
           {text.slice(sp.start, sp.end)}
@@ -848,12 +859,13 @@ const PartPopover: React.FC<{
     <motion.div
       id="part-popover-portal"
       key={part.part_id}
-      initial={{ opacity: 0, x: 8, scale: 0.97 }}
-      animate={{ opacity: 1, x: 0, scale: 1 }}
-      exit={{ opacity: 0, x: 8, scale: 0.97 }}
-      transition={{ duration: 0.14 }}
+      initial={{ opacity: 0, x: 16, y: 6, scale: 0.94 }}
+      animate={{ opacity: 1, x: 0, y: 0, scale: 1 }}
+      exit={{ opacity: 0, x: 16, y: 6, scale: 0.94 }}
+      whileHover={{ scale: 1.025, y: -2 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 30 }}
       style={{ position: 'fixed', top: pos.top, right: pos.right, zIndex: 9999 }}
-      className="w-[340px] bg-white rounded-2xl border border-[#E2DFD7] shadow-xl p-4 space-y-3 text-[12px]"
+      className="w-[340px] bg-white rounded-2xl border border-[#E2DFD7] shadow-2xl ring-1 ring-[#191918]/10 p-4 space-y-3 text-[12px]"
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
     >
@@ -1001,7 +1013,13 @@ const RubricPane: React.FC<{
               <div
                 key={p.part_id}
                 ref={el => { if (el) rowRefs.current.set(p.part_id, el); else rowRefs.current.delete(p.part_id); }}
-                className={`relative border-b border-[#F0EEE8] ${isActive ? 'bg-[#FAF9F5]' : ''}`}
+                className={`relative border-b border-[#F0EEE8] transition-colors ${
+                  isOpen
+                    ? 'bg-[#FFF7ED] ring-1 ring-inset ring-[#D97706]/35'
+                    : isActive
+                      ? 'bg-[#FAF9F5]'
+                      : ''
+                }`}
               >
                 {/* one-line row */}
                 <div className="flex items-center gap-2 px-3 py-2.5">

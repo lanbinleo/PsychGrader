@@ -29,10 +29,13 @@ const FLAG_LABELS: Record<string, { text: string; tone: 'warn' | 'err' | 'ok' }>
   duplicate_source: { text: '与 B 段同源冲突', tone: 'err' },
   duplicate_concept: { text: '与 B 段概念重复', tone: 'err' },
   ineligible_concept: { text: '误踩题干禁用词', tone: 'err' },
+  misapplied_concept: { text: '概念运用不当', tone: 'err' },
+  inaccurate_explanation: { text: '解释不准确', tone: 'warn' },
   definition_only: { text: '纯背定义未结合材料', tone: 'warn' },
   direction_reversed: { text: '实验结果方向说反', tone: 'err' },
   self_contradiction: { text: '前后自相矛盾熔断', tone: 'err' },
   oversimplified_claim: { text: '复述问句或主张空泛', tone: 'warn' },
+  unverified_quote: { text: '引文未在原句中找到', tone: 'warn' },
   implicit_claim_rescued: { text: '隐含 Claim 救济生效', tone: 'ok' },
 };
 

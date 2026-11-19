@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,6 +19,22 @@ import (
 	"psychgrader/internal/models"
 	"psychgrader/internal/pdfparse"
 )
+
+// defaultMaxOutputTokens is deliberately much larger than the old 8192 cap.
+// Thinking models spend output budget on reasoning_content as well, so a low
+// cap can truncate the JSON even when the answer itself is short.
+const defaultMaxOutputTokens = 32768
+
+var errOutputTruncated = errors.New("model output truncated")
+
+func maxOutputTokens() int {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_MAX_OUTPUT_TOKENS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultMaxOutputTokens
+}
 
 type DeepSeekConfig struct {
 	BaseURL         string
@@ -203,7 +221,7 @@ func GradeSubmission(ctx context.Context, cfg DeepSeekConfig, ps models.ProblemS
 			{Role: "user", Content: usrPrompt},
 		},
 		ResponseFormat: &dsRespFormat{Type: "json_object"},
-		MaxTokens:      8192,
+		MaxTokens:      maxOutputTokens(),
 		Stream:         false,
 	}
 
@@ -236,6 +254,39 @@ func GradeSubmission(ctx context.Context, cfg DeepSeekConfig, ps models.ProblemS
 		return nil, err
 	}
 
+	res, err := parseGradingResponse(respBytes, ps, sentences, model)
+	if err != nil && errors.Is(err, errOutputTruncated) &&
+		reqBody.Thinking != nil && reqBody.Thinking.Type == "enabled" {
+		// One automatic fallback: thinking consumes the output budget. Keep the
+		// same (large) cap but disable thinking; if this still truncates, report
+		// the configured limit so the operator can raise it.
+		retry := reqBody
+		retry.Thinking = &dsThinking{Type: "disabled"}
+		retry.ReasoningEffort = ""
+		temp := 0.1
+		retry.Temperature = &temp
+		if retryPayload, mErr := json.Marshal(retry); mErr == nil {
+			if retryBytes, rErr := doChatRequest(ctx, cfg, retryPayload); rErr == nil {
+				if retryRes, pErr := parseGradingResponse(retryBytes, ps, sentences, model); pErr == nil {
+					return retryRes, nil
+				} else {
+					err = pErr
+				}
+			} else {
+				err = rErr
+			}
+		}
+	}
+	if err != nil {
+		if errors.Is(err, errOutputTruncated) {
+			return nil, fmt.Errorf("模型输出在 %d token 上限下仍被截断；请缩短单份答卷，或用 DEEPSEEK_MAX_OUTPUT_TOKENS 调大上限", maxOutputTokens())
+		}
+		return nil, err
+	}
+	return res, nil
+}
+
+func parseGradingResponse(respBytes []byte, ps models.ProblemSet, sentences []models.SentencePair, model string) (*models.GradingResult, error) {
 	var dsResp dsResponse
 	if err := json.Unmarshal(respBytes, &dsResp); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
@@ -244,7 +295,7 @@ func GradeSubmission(ctx context.Context, cfg DeepSeekConfig, ps models.ProblemS
 		return nil, fmt.Errorf("模型未返回候选结果")
 	}
 	if strings.EqualFold(dsResp.Choices[0].FinishReason, "length") {
-		return nil, fmt.Errorf("模型输出被截断（finish_reason=length），请降低 thinking/推理强度后重试")
+		return nil, errOutputTruncated
 	}
 
 	content := cleanJSONFence(dsResp.Choices[0].Message.Content)

@@ -60,6 +60,10 @@ OFFICIAL GENERAL & PART-SPECIFIC RULES:
 CHINESE TRANSLATION RULE:
 Translate each sentence [S1..Sn] into faithful, literal Chinese ("zh"). Do NOT polish, repair broken logic, or beautify awkward student phrasing—teachers rely on the Chinese column to spot vague or circular writing quickly.
 
+KEY TERM FORMAT:
+- Keep AP Psychology key terms in English. On the FIRST occurrence across the entire JSON output, write the English term followed by its Chinese gloss in full-width parentheses, e.g. "spacing effect（间隔效应）". On every later occurrence write ONLY the English term ("spacing effect"). Never write "间隔效应（spacing effect）".
+- Apply this to "zh" translations, annotations[].comment_zh, rubric_parts[].reason_zh, and summary_zh. Each term gets at most one Chinese gloss in the whole output; do not add parentheses after every occurrence.
+
 OUTPUT JSON SCHEMA:
 {
   "translations": [{"id": "S1", "zh": "..."}],
@@ -129,6 +133,10 @@ OFFICIAL 2026 COLLEGE BOARD EBQ SCORING RULES (CRITICAL):
 
 CHINESE TRANSLATION RULE:
 Translate EVERY sentence [S1..Sn] faithfully and literally into Chinese ("zh"). Keep the student's exact reasoning structure—do NOT embellish, fix logical leaps, or clean up vague wording, so the teacher can read the Chinese column at high speed and immediately see what the student actually wrote.
+
+KEY TERM FORMAT:
+- Keep AP Psychology key terms in English. On the FIRST occurrence across the entire JSON output, write the English term followed by its Chinese gloss in full-width parentheses, e.g. "spacing effect（间隔效应）". On every later occurrence write ONLY the English term ("spacing effect"). Never write "间隔效应（spacing effect）".
+- Apply this to "zh" translations, annotations[].comment_zh, rubric_parts[].reason_zh, and summary_zh. Each term gets at most one Chinese gloss in the whole output; do not add parentheses after every occurrence.
 
 ANNOTATION CATEGORIES:
 - "claim": Thesis / claim statement (Part A or rescued implicit claim)

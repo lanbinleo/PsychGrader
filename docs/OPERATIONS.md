@@ -24,6 +24,7 @@
 | `DEEPSEEK_API_KEY` | 空 | 首次启动/未在设置页填写时使用 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 默认 API 地址 |
 | `DEEPSEEK_MODEL` | `deepseek-flash` | 默认模型 |
+| `DEEPSEEK_MAX_OUTPUT_TOKENS` | `32768` | 单次输出上限；长答卷/长翻译可调大；thinking 截断时会自动关闭 thinking 重试一次 |
 | `GIN_MODE` | `release` | `debug` 可看到路由日志（会记录 URL，生产不建议） |
 
 > 口令/密钥不要写进 git；`.env` 已在 `.gitignore` 与 `.dockerignore` 中。
