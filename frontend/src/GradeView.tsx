@@ -949,7 +949,7 @@ const RubricPane: React.FC<{
   onSave: () => void;
   onGrade: () => void;
 }> = ({
-  parts, notes, activePartId, effectiveScore, aiScore, hasOverride,
+  sub, parts, notes, activePartId, effectiveScore, aiScore, hasOverride,
   saving, grading, onSelectPart, onSetScore, onReset, onNotes, onSave,
 }) => {
   const [popover, setPopover] = useState<string | null>(null);
@@ -957,17 +957,33 @@ const RubricPane: React.FC<{
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const maxTotal = parts.reduce((sum, p) => sum + p.max_score, 0) || 7;
 
+  // Selecting another student must not inherit the previous student's open
+  // popover/highlight. Nothing is highlighted until the user hovers again.
+  useEffect(() => {
+    setPopover(null);
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+  }, [sub.id]);
+
   const openPopover = (partId: string) => {
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
     setPopover(partId);
     onSelectPart(partId);
   };
   const closePopoverDelayed = () => {
-    hoverTimerRef.current = setTimeout(() => setPopover(null), 200);
+    hoverTimerRef.current = setTimeout(() => {
+      setPopover(null);
+      // The "active part" highlight should not outlive the user's hover.
+      onSelectPart(null);
+    }, 200);
   };
   const cancelClose = () => {
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
   };
+  useEffect(() => {
+    return () => {
+      if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    };
+  }, []);
 
   return (
     <div className="w-full h-full flex flex-col overflow-visible">
@@ -1069,7 +1085,7 @@ const RubricPane: React.FC<{
                   <PartPopover
                     anchorRef={{ current: rowRefs.current.get(p.part_id) ?? null }}
                     part={p}
-                    onClose={() => setPopover(null)}
+                    onClose={() => { setPopover(null); onSelectPart(null); }}
                     onSetScore={onSetScore}
                     onMouseEnter={cancelClose}
                     onMouseLeave={closePopoverDelayed}

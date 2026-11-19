@@ -30,7 +30,7 @@
 - **LLM 输出预算**：`max_tokens` 从 8192 提升到 32768（可用 `DEEPSEEK_MAX_OUTPUT_TOKENS` 覆盖）；`finish_reason=length` 时自动关闭 thinking 重试一次，仍截断才报错并提示调大上限。
 - **Keyterm 翻译规范**：prompt 要求 APA 心理学术语保留英文；首次出现 `spacing effect（间隔效应）`，后续只写 `spacing effect`；同时约束 `zh`、`comment_zh`、`reason_zh`、`summary_zh`。种子示例同步修正。
 - **Flag 中文标签**：`misapplied_concept`、`inaccurate_explanation`、`unverified_quote`、`missing_part` 等补中文；未知 flag 仍显示原文。
-- **评分准则 hover**：popover 增加 translate/scale 动效、阴影与 ring；打开的采分项行高亮；卷面对应 annotation 使用更强 outline/阴影。
+- **评分准则 hover**：popover 增加 translate/scale 动效、阴影与 ring；打开的采分项行高亮；卷面对应 annotation 使用更强 outline/阴影。切换学生不再自动选中第一采分项；鼠标离开 popover 后清除高亮，避免替教师做选择。
 - **Docker**：新增 `.dockerignore`（.env / data / node_modules / dist / .git），避免把宿主 Windows `node_modules` 和 PII 带进构建上下文；非 root UID 1000、cap_drop、healthcheck；compose 端口绑定 loopback。
 - **复审保护合并**：AI 重跑返回时若教师有未核定改分，前端按 `part_id` 合并教师覆盖与新 AI reason/flags/evidence，不再整份保留旧草稿；避免“新 AI 总分 + 旧 AI 分项”混写。
 - **第二轮审查补丁**：`SaveGradingResult` 改为先合并教师分项再 marshal（否则 force 重跑仍会丢分项）；单份批改也走 `oneShot` 互斥 + `gradeSem` + 180s 超时；`CreateGradingTask` 在事务内检查“每 pset 唯一活跃任务”（import/grade-all 并发统一返回复用或 task_error）；启动对账把无 task 归属的 grading 卷置 `pending`，不再卡 `queued`；超时归 `failed` 不归 `canceled`；`SetTaskItemStatus` 加终态保护；`RefreshTaskCounts` 重算 total；worker 加 `recover`；非 GET 写接口要求 `application/json`（PDF 上传要求 multipart）并拒绝跨站 Origin；`ALLOWED_API_BASE_URLS` 改 host/path 边界匹配；`r.SetTrustedProxies(nil)` 防 X-Forwarded-For 绕过登录限流；非 loopback + 空口令时拒绝启动。

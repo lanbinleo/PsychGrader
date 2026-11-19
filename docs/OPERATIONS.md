@@ -44,7 +44,13 @@ cd ..
 
 # 显式口令
 .\\start-local.ps1 -Passcode "local-strong-passphrase"
+
+# 局域网访问（非 loopback 必须设置口令）
+.\\start-local.ps1 -BindHost 0.0.0.0 -Passcode "strong-lan-passphrase"
 ```
+
+- `start-local.ps1` 使用 `Start-Process` 启动，才能继承 `HOST/PORT/ADMIN_PASSCODE/APP_SECRET/DB_PATH/STATIC_DIR`；WMI `Win32_Process` 不会继承这些变量。
+- `-BindHost 0.0.0.0` 时如果没有口令，脚本会生成随机 `ADMIN_PASSCODE` 并打印；Windows 防火墙可能仍需放行 8090。
 
 - `frontend/dist` 被 `.gitignore` 忽略；新克隆必须构建，否则 `start-local.ps1` 会服务旧/缺失 UI。
 - 修改前端后重新 `npm run build`；开发时可用 `npm run dev`（Vite `5173`，代理 `/api` 到 `8090`）。

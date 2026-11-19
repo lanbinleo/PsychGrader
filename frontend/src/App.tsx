@@ -77,6 +77,10 @@ function hasTeacherEdit(p: RubricPartScore): boolean {
   return p.teacher_score != null || !!p.teacher_comment;
 }
 
+function keepActivePart(current: string | null, parts: RubricPartScore[]): string | null {
+  return current && parts.some(p => p.part_id === current) ? current : null;
+}
+
 // When the AI result changes while the teacher has unsaved edits, keep the
 // teacher's per-part override but take the NEW AI reason/flags/evidence.
 // Keeping the entire old draft would write old AI parts back over the new run.
@@ -111,7 +115,7 @@ function reducer(s: State, a: Action): State {
         draftParts: parts,
         draftNotes: first?.teacher_notes || '',
         draftDirty: false,
-        activePartId: parts[0]?.part_id ?? null,
+        activePartId: null,
       };
     }
     case 'SET_ACTIVE_PSET':
@@ -123,25 +127,23 @@ function reducer(s: State, a: Action): State {
       const active = a.subs.find(x => x.id === s.activeSubId);
       if (active && !s.draftDirty) {
         const parts = draftOf(active);
-        const keepPart = parts.some(p => p.part_id === s.activePartId);
         return {
           ...s,
           subs: a.subs,
           draftParts: parts,
           draftNotes: active.teacher_notes || '',
-          activePartId: keepPart ? s.activePartId : (parts[0]?.part_id ?? null),
+          activePartId: keepActivePart(s.activePartId, parts),
         };
       }
       if (active && s.draftDirty) {
         const parts = mergeDraftParts(draftOf(active), s.draftParts);
-        const keepPart = parts.some(p => p.part_id === s.activePartId);
         return {
           ...s,
           subs: a.subs,
           draftParts: parts,
           draftNotes: s.draftNotes,
           draftDirty: true,
-          activePartId: keepPart ? s.activePartId : (parts[0]?.part_id ?? null),
+          activePartId: keepActivePart(s.activePartId, parts),
         };
       }
       if (!active && a.subs.length > 0 && (s.activeSubId === null || !s.draftDirty)) {
@@ -154,7 +156,7 @@ function reducer(s: State, a: Action): State {
           draftParts: parts,
           draftNotes: first.teacher_notes || '',
           draftDirty: false,
-          activePartId: parts[0]?.part_id ?? null,
+          activePartId: null,
         };
       }
       return { ...s, subs: a.subs };
@@ -167,7 +169,7 @@ function reducer(s: State, a: Action): State {
         draftParts: parts,
         draftNotes: a.sub.teacher_notes || '',
         draftDirty: false,
-        activePartId: parts[0]?.part_id ?? null,
+        activePartId: null,
       };
     }
     case 'SET_DRAFT_PARTS': return { ...s, draftParts: a.parts, draftDirty: true };
@@ -194,25 +196,23 @@ function reducer(s: State, a: Action): State {
       if (s.activeSubId !== a.sub.id) return { ...s, subs };
       if (!a.syncDraft && s.draftDirty) {
         const parts = mergeDraftParts(draftOf(a.sub), s.draftParts);
-        const keepPart = parts.some(p => p.part_id === s.activePartId);
         return {
           ...s,
           subs,
           draftParts: parts,
           draftNotes: s.draftNotes,
           draftDirty: true,
-          activePartId: keepPart ? s.activePartId : (parts[0]?.part_id ?? null),
+          activePartId: keepActivePart(s.activePartId, parts),
         };
       }
       const parts = draftOf(a.sub);
-      const keepPart = parts.some(p => p.part_id === s.activePartId);
       return {
         ...s,
         subs,
         draftParts: parts,
         draftNotes: a.sub.teacher_notes || '',
         draftDirty: false,
-        activePartId: keepPart ? s.activePartId : (parts[0]?.part_id ?? null),
+        activePartId: keepActivePart(s.activePartId, parts),
       };
     }
     case 'SET_BATCH': return { ...s, batch: a.batch };

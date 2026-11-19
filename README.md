@@ -56,6 +56,9 @@ cd ..
 
 # Optional: explicit local passcode
 .\\start-local.ps1 -Passcode "your-local-passphrase"
+
+# Optional: expose to LAN (auth is mandatory when bind host is not loopback)
+.\\start-local.ps1 -BindHost 0.0.0.0 -Passcode "your-strong-passphrase"
 ```
 
 `start-local.ps1` loads simple `KEY=VALUE` pairs from `.env` when present, binds to `127.0.0.1`, and warns if `ADMIN_PASSCODE` is empty. Rebuild `frontend/dist` after frontend changes.
