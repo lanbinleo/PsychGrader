@@ -1,0 +1,16 @@
+# Binaries & Data
+backend/psychgrader.exe
+backend/psychgrader
+backend/data/
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Secrets & Local Test Artifacts
+.env
+test-artifacts/

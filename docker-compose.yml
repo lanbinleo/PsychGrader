@@ -1,0 +1,18 @@
+services:
+  psychgrader:
+    build: .
+    container_name: psychgrader
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8090}:8090"
+    environment:
+      - PORT=8090
+      - DB_PATH=/app/data/psychgrader.db
+      - STATIC_DIR=/app/static
+      - ADMIN_PASSCODE=${ADMIN_PASSCODE:-}
+      - APP_SECRET=${APP_SECRET:-psychgrader-secret-change-me}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-flash}
+    volumes:
+      - ./data:/app/data
