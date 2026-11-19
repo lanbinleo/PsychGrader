@@ -7,19 +7,21 @@ Base URL：`http://<host>:8090/api`
 Authorization: Bearer <token>
 ```
 
+> 所有写接口（POST/PUT/DELETE）必须发送 `Content-Type: application/json`；`POST /problem-sets/:id/parse-pdf` 例外，必须使用 `multipart/form-data`。跨站 `Origin` 会被拒绝（CSRF 防护）。
+
 Token 由登录返回，HMAC 签名，默认 **7 天过期**；`APP_SECRET` 为空时每次进程重启都会重新生成 secret，旧 token 失效。所有接口均可能返回 `401 {"error":"需要口令登录","auth_required":true}`。
 
 ---
 
 ## 1. 健康检查与鉴权
 
-### `GET /health`（公开）
+### `GET /api/health`（公开）
 
 ```json
 { "ok": true }
 ```
 
-用于 Docker `/api/health` healthcheck；注意实际路径是 `/api/health`（Gin group 前缀）。
+用于 Docker healthcheck；实际路由在 `/api` group 下。
 
 ### `GET /auth/status`
 
@@ -183,7 +185,7 @@ Token 由登录返回，HMAC 签名，默认 **7 天过期**；`APP_SECRET` 为�
 
 ### `GET /problem-sets/:id/submission-statuses`
 
-轻量轮询用：只返回 id/name/status/score/error/updated_at，无 `raw_text`、无 `result`。
+轻量轮询用：返回 `id/problem_set_id/student_name/student_code/page_range/status/ai_score/final_score/teacher_notes/error_msg/created_at/updated_at`，无 `raw_text`、无 `result`。
 
 ### `GET /submissions/:id`
 
@@ -234,7 +236,7 @@ Token 由登录返回，HMAC 签名，默认 **7 天过期**；`APP_SECRET` 为�
 { "only_unscored": true }
 ```
 
-- `only_unscored=true`：跳过 `ai_graded`、`grading`、`queued`、`reviewed`、`needs_rereview`。
+- `only_unscored=true`（缺省值）：跳过 `ai_graded`、`grading`、`queued`、`reviewed`、`needs_rereview`。
 - `only_unscored=false`：重新批改 `ai_graded`，仍跳过 `reviewed`、`needs_rereview`、`grading`、`queued`。
 - 同一题集已有 `queued/running/paused` 任务：`200 {"task":{...},"reused":true,"queued":0,"skipped":0}`。
 - 新建成功：`202 {"task":{...},"reused":false,"queued":N,"skipped":M}`。
@@ -294,7 +296,8 @@ Token 由登录返回，HMAC 签名，默认 **7 天过期**；`APP_SECRET` 为�
 - 任务：每 1.5s `GET /tasks/:id`；
 - 队列：每 2 次任务轮询拉一次 `GET /problem-sets/:id/submissions`（完整结果）；
 - 终态后停止轮询并刷一次题集统计。
-- 页面隐藏（`visibilitychange`）时暂停轮询，恢复时立即拉一次。
+- 终态后停止轮询并刷一次题集统计。
+- 页面隐藏时建议暂停轮询（前端后续可加 `visibilitychange`），恢复时立即拉一次。
 
 ---
 

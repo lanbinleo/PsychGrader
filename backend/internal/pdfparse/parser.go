@@ -31,7 +31,7 @@ func ExtractPages(ctx context.Context, data []byte) ([]string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("PDF 解析超时或已取消: %w", err)
 	}
-	return extractPureGo(data)
+	return extractPureGo(ctx, data)
 }
 
 func extractWithPdftotext(ctx context.Context, data []byte) ([]string, error) {
@@ -71,7 +71,7 @@ func extractWithPdftotext(ctx context.Context, data []byte) ([]string, error) {
 	return pages, nil
 }
 
-func extractPureGo(data []byte) ([]string, error) {
+func extractPureGo(ctx context.Context, data []byte) ([]string, error) {
 	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse PDF: %w", err)
@@ -82,6 +82,9 @@ func extractPureGo(data []byte) ([]string, error) {
 	}
 	pages := make([]string, 0, total)
 	for i := 1; i <= total; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("PDF 解析超时或已取消: %w", err)
+		}
 		p := reader.Page(i)
 		if p.V.IsNull() {
 			pages = append(pages, "")

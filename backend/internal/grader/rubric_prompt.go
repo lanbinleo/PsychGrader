@@ -90,7 +90,12 @@ OUTPUT JSON SCHEMA:
       "reason_zh": "简洁中文判分依据",
       "evidence_quote": "short quote",
       "flags": []
-    }
+    },
+    {"part_id": "part_b", "ai_score": 1, "cited_source": "Article", "applied_concept": "", "reason_zh": "...", "evidence_quote": "...", "flags": []},
+    {"part_id": "part_c", "ai_score": 1, "cited_source": "Article", "applied_concept": "", "reason_zh": "...", "evidence_quote": "...", "flags": []},
+    {"part_id": "part_d", "ai_score": 1, "cited_source": "Article", "applied_concept": "", "reason_zh": "...", "evidence_quote": "...", "flags": []},
+    {"part_id": "part_e", "ai_score": 1, "cited_source": "Article", "applied_concept": "", "reason_zh": "...", "evidence_quote": "...", "flags": []},
+    {"part_id": "part_f", "ai_score": 2, "cited_source": "Article", "applied_concept": "", "reason_zh": "...", "evidence_quote": "...", "flags": []}
   ],
   "summary_zh": "2-sentence Chinese overview for the teacher."
 }`

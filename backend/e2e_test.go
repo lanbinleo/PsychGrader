@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,6 +89,7 @@ func TestFullEndToEndPipeline(t *testing.T) {
 	// 1. Start a local mock DeepSeek V4.1 server verifying protocol parameters
 	var capturedModel string
 	var capturedThinking bool
+	var captureMu sync.Mutex
 	mockDeepSeek := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
@@ -98,12 +100,16 @@ func TestFullEndToEndPipeline(t *testing.T) {
 		}
 		var reqPayload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&reqPayload); err != nil {
-			t.Fatalf("decode mock request: %v", err)
+			t.Errorf("decode mock request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
 		}
+		captureMu.Lock()
 		capturedModel, _ = reqPayload["model"].(string)
 		if th, ok := reqPayload["thinking"].(map[string]any); ok && th["type"] == "enabled" {
 			capturedThinking = true
 		}
+		captureMu.Unlock()
 
 		// Handle connectivity ping vs full rubric grading
 		msgs, _ := reqPayload["messages"].([]any)
@@ -314,8 +320,11 @@ func TestFullEndToEndPipeline(t *testing.T) {
 		t.Fatalf("gradeOne failed with %d", code)
 	}
 
-	if capturedModel != "deepseek-flash" || !capturedThinking {
-		t.Fatalf("expected deepseek-flash + thinking:enabled, got model=%q thinking=%v", capturedModel, capturedThinking)
+	captureMu.Lock()
+	gotModel, gotThinking := capturedModel, capturedThinking
+	captureMu.Unlock()
+	if gotModel != "deepseek-flash" || !gotThinking {
+		t.Fatalf("expected deepseek-flash + thinking:enabled, got model=%q thinking=%v", gotModel, gotThinking)
 	}
 	// Crucial check: LLM returned 7 (1+1+2+1+2), but EnforceOfficialRules caught "distributed practice" == "spacing effect" and capped total to 6!
 	if gradedSub.Result == nil || gradedSub.Result.AITotalScore != 6 {

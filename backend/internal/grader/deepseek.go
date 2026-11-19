@@ -375,6 +375,11 @@ func validateAnnotations(in []models.Annotation, sentences []models.SentencePair
 		if a.ID == "" {
 			a.ID = fmt.Sprintf("A%d", len(out)+1)
 		}
+		switch a.Category {
+		case "claim", "evidence", "explanation", "concept", "issue":
+		default:
+			a.Category = "issue"
+		}
 		q := strings.TrimSpace(a.ExactQuote)
 		if q != "" && !strings.Contains(strings.ToLower(sent.En), strings.ToLower(q)) {
 			a.Flags = appendUnique(a.Flags, "unverified_quote")
@@ -524,7 +529,7 @@ func HeuristicOfflineGrade(ps models.ProblemSet, sentences []models.SentencePair
 		parts = DefaultAAQRubricTemplate()
 	}
 
-	var annotations []models.Annotation
+	var annotations = make([]models.Annotation, 0)
 	var foundSources []struct {
 		sentID string
 		src    string

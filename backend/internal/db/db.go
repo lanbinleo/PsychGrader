@@ -18,6 +18,9 @@ import (
 // submission without an explicit force flag.
 var ErrReviewed = errors.New("submission is already reviewed")
 
+// ErrActiveTask means the problem set already has a queued/running/paused task.
+var ErrActiveTask = errors.New("problem set already has an active grading task")
+
 type Store struct {
 	DB *sql.DB
 }
@@ -423,15 +426,24 @@ WHERE id = ? AND status IN ('queued', 'pending', 'error', 'canceled')`, nowISO()
 	return n > 0, nil
 }
 
+// ClaimSubmissionForGrading also allows a single-submission rerun of an
+// already AI-graded paper. Reviewed papers are intentionally excluded.
+func (s *Store) ClaimSubmissionForGrading(id int64) (bool, error) {
+	res, err := s.DB.Exec(`
+UPDATE submissions SET status = 'grading', error_msg = '', updated_at = ?
+WHERE id = ? AND status IN ('queued', 'pending', 'error', 'canceled', 'ai_graded', 'needs_rereview')`, nowISO(), id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // SaveGradingResult protects teacher-reviewed submissions: without force it
 // refuses to overwrite a reviewed submission. With force (or when the
 // submission is already needs_rereview) it merges the teacher's per-part
 // scores/comments and marks the submission needs_rereview.
 func (s *Store) SaveGradingResult(id int64, res *models.GradingResult, force bool) error {
-	raw, err := json.Marshal(res)
-	if err != nil {
-		return err
-	}
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return err
@@ -456,6 +468,12 @@ func (s *Store) SaveGradingResult(id int64, res *models.GradingResult, force boo
 		newStatus = "needs_rereview"
 	}
 
+	// Marshal AFTER mergeTeacherParts: otherwise teacher scores/comments are
+	// lost from result_json even though the in-memory result has them.
+	raw, err := json.Marshal(res)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`
 UPDATE submissions
 SET status = ?, ai_score = ?, result_json = ?, error_msg = '', updated_at = ?
@@ -563,7 +581,10 @@ func (s *Store) ReconcileInterruptedTasks() error {
 	if _, err := tx.Exec(`UPDATE grading_tasks SET status = 'paused', error_summary = '服务重启中断，可在任务中心继续' WHERE status IN ('queued', 'running')`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE submissions SET status = 'queued', error_msg = '服务重启中断，等待继续', updated_at = ? WHERE status = 'grading'`, nowISO()); err != nil {
+	if _, err := tx.Exec(`UPDATE submissions SET status = 'queued', error_msg = '服务重启中断，等待继续', updated_at = ? WHERE status = 'grading' AND id IN (SELECT submission_id FROM grading_task_items)`, nowISO()); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE submissions SET status = 'pending', error_msg = '服务重启中断，请重试单份批改', updated_at = ? WHERE status = 'grading' AND id NOT IN (SELECT submission_id FROM grading_task_items)`, nowISO()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -576,6 +597,16 @@ func (s *Store) CreateGradingTask(psetID int64, source string, ids []int64) (*mo
 		return nil, err
 	}
 	defer tx.Rollback()
+
+	var active int
+	if err := tx.QueryRow(`
+SELECT COUNT(*) FROM grading_tasks
+WHERE problem_set_id = ? AND status IN ('queued', 'running', 'paused')`, psetID).Scan(&active); err != nil {
+		return nil, err
+	}
+	if active > 0 {
+		return nil, ErrActiveTask
+	}
 
 	res, err := tx.Exec(`
 INSERT INTO grading_tasks(problem_set_id, status, total, source, created_at)
@@ -712,17 +743,18 @@ func (s *Store) SetTaskItemStatus(taskID, subID int64, status, errMsg string) er
 	_, err := s.DB.Exec(`
 UPDATE grading_task_items
 SET status = ?, error_msg = ?, finished_at = ?
-WHERE task_id = ? AND submission_id = ?`, status, errMsg, nowISO(), taskID, subID)
+WHERE task_id = ? AND submission_id = ? AND status IN ('queued', 'running')`, status, errMsg, nowISO(), taskID, subID)
 	return err
 }
 
 func (s *Store) RefreshTaskCounts(taskID int64) error {
 	_, err := s.DB.Exec(`
 UPDATE grading_tasks SET
+  total = (SELECT COUNT(*) FROM grading_task_items WHERE task_id = ?),
   succeeded = (SELECT COUNT(*) FROM grading_task_items WHERE task_id = ? AND status = 'succeeded'),
   failed = (SELECT COUNT(*) FROM grading_task_items WHERE task_id = ? AND status = 'failed'),
   canceled = (SELECT COUNT(*) FROM grading_task_items WHERE task_id = ? AND status = 'canceled')
-WHERE id = ?`, taskID, taskID, taskID, taskID)
+WHERE id = ?`, taskID, taskID, taskID, taskID, taskID)
 	return err
 }
 
@@ -749,7 +781,7 @@ WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
 
 func (s *Store) SetTaskPaused(taskID int64, reason string) error {
 	_, err := s.DB.Exec(`
-UPDATE grading_tasks SET status = 'paused', error_summary = ? WHERE id = ?`, reason, taskID)
+UPDATE grading_tasks SET status = 'paused', error_summary = ? WHERE id = ? AND status IN ('queued', 'running')`, reason, taskID)
 	return err
 }
 

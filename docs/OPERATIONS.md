@@ -2,7 +2,7 @@
 
 ## 1. 运行形态
 
-- 单进程 Go 二进制，内嵌 `frontend/dist` 静态文件。
+- 单进程 Go 二进制 + 同目录 `static` 前端构建产物（Docker 从 `frontend/dist` 复制，或 `STATIC_DIR` 指定）。
 - SQLite（WAL）文件默认 `./data/psychgrader.db`；同时产生 `-wal` / `-shm`。
 - 默认监听 `127.0.0.1:8090`；Docker 内 `HOST=0.0.0.0`，compose 只把端口发布到宿主机 loopback。
 - 生产必须放在 TLS 反代（Caddy / Nginx / Cloudflare Tunnel）之后；应用本身不做 TLS。
@@ -26,6 +26,8 @@
 | `GIN_MODE` | `release` | `debug` 可看到路由日志（会记录 URL，生产不建议） |
 
 > 口令/密钥不要写进 git；`.env` 已在 `.gitignore` 与 `.dockerignore` 中。
+>
+> **重要**：`.env.example` 里的 `ADMIN_PASSCODE` / `APP_SECRET` 是占位值，部署前必须替换为随机值；如果 `.env` 曾经包含真实 DeepSeek Key，且该文件被共享、打包或上传过，请立即在 DeepSeek 控制台吊销并轮换。`backend/data/psychgrader.db*` 含学生 PII 与可能明文 API Key，不要随代码/压缩包分发。
 
 ## 3. 本地开发
 

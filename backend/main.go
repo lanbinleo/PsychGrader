@@ -30,6 +30,14 @@ func main() {
 		// accident on a LAN.
 		host = "127.0.0.1"
 	}
+	if strings.TrimSpace(os.Getenv("ADMIN_PASSCODE")) == "" {
+		switch host {
+		case "127.0.0.1", "localhost", "::1":
+			log.Printf("WARNING: ADMIN_PASSCODE is empty; auth is disabled on loopback only")
+		default:
+			log.Fatal("ADMIN_PASSCODE must be set when HOST is not loopback (refusing to expose an unauthenticated instance)")
+		}
+	}
 	staticDir := os.Getenv("STATIC_DIR")
 	if staticDir == "" {
 		if _, err := os.Stat("./static/index.html"); err == nil {
@@ -51,6 +59,10 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery(), gin.Logger())
 	r.MaxMultipartMemory = 8 << 20
+	// Gin trusts all proxies by default, which lets clients spoof
+	// X-Forwarded-For and bypass the login limiter. The app is meant to sit
+	// behind one reverse proxy; if needed, configure trusted proxies explicitly.
+	_ = r.SetTrustedProxies(nil)
 
 	// CORS is limited to the local Vite dev server and configured production
 	// origins. Wildcard CORS plus an empty passcode would let any website read
@@ -66,15 +78,44 @@ func main() {
 	}
 	r.Use(func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
+		sameOrigin := false
+		if i := strings.Index(origin, "://"); i >= 0 && origin[i+3:] == c.Request.Host {
+			sameOrigin = true
+		}
 		if origin != "" {
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
 			c.Header("Vary", "Origin")
-			if allowedOrigins[origin] {
-				c.Header("Access-Control-Allow-Origin", origin)
+			if allowedOrigins[origin] || sameOrigin {
+				if !sameOrigin {
+					c.Header("Access-Control-Allow-Origin", origin)
+				}
+			} else {
+				// CORS controls reads, not whether a cross-site POST is sent.
+				// Reject non-GET cross-origin writes explicitly.
+				if c.Request.Method != http.MethodOptions && c.Request.Method != http.MethodGet {
+					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "跨站请求被拒绝"})
+					return
+				}
 			}
 			if c.Request.Method == http.MethodOptions {
 				c.AbortWithStatus(http.StatusNoContent)
+				return
+			}
+		}
+
+		// CSRF hardening for write endpoints: require JSON, except multipart
+		// PDF upload. This blocks simple form / text-plain cross-site POSTs.
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead &&
+			c.Request.Method != http.MethodOptions {
+			ct := c.ContentType()
+			if strings.Contains(c.Request.URL.Path, "/parse-pdf") {
+				if !strings.HasPrefix(ct, "multipart/form-data") {
+					c.AbortWithStatusJSON(http.StatusUnsupportedMediaType, gin.H{"error": "PDF 上传必须使用 multipart/form-data"})
+					return
+				}
+			} else if !strings.HasPrefix(ct, "application/json") {
+				c.AbortWithStatusJSON(http.StatusUnsupportedMediaType, gin.H{"error": "写接口必须使用 application/json"})
 				return
 			}
 		}

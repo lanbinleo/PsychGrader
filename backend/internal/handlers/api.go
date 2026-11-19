@@ -48,6 +48,7 @@ type Server struct {
 	taskMu      sync.Mutex
 	taskRunning map[int64]bool
 	taskCancel  map[int64]context.CancelFunc
+	oneShot     map[int64]bool
 
 	loginMu    sync.Mutex
 	loginFails map[string][]time.Time
@@ -70,6 +71,7 @@ func NewServer(store *db.Store) *Server {
 		gradeSem:    make(chan struct{}, 16),
 		taskRunning: make(map[int64]bool),
 		taskCancel:  make(map[int64]context.CancelFunc),
+		oneShot:     make(map[int64]bool),
 		loginFails:  make(map[string][]time.Time),
 	}
 }
@@ -309,7 +311,13 @@ func (s *Server) validateBaseURL(raw string) error {
 	}
 	for _, prefix := range strings.Split(os.Getenv("ALLOWED_API_BASE_URLS"), ",") {
 		prefix = strings.TrimRight(strings.TrimSpace(prefix), "/")
-		if prefix != "" && strings.HasPrefix(raw, prefix) {
+		if prefix == "" || !strings.HasPrefix(raw, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(raw, prefix)
+		// Require a path boundary; reject https://api.deepseek.com.evil.example
+		// and https://api.deepseek.com@evil.example.
+		if rest == "" || strings.HasPrefix(rest, "/") {
 			return nil
 		}
 	}
@@ -415,6 +423,15 @@ func (s *Server) handleUpdateProblemSet(c *gin.Context) {
 
 func (s *Server) handleDeleteProblemSet(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	if active, _ := s.Store.GetActiveTask(id); active != nil {
+		s.taskMu.Lock()
+		cancel := s.taskCancel[active.ID]
+		s.taskMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		_ = s.Store.CancelTask(active.ID)
+	}
 	if err := s.Store.DeleteProblemSet(id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -422,10 +439,19 @@ func (s *Server) handleDeleteProblemSet(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"deleted": id})
 }
 
+func isBodyTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
 func (s *Server) handleParsePDF(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadBytes)
 	fh, err := c.FormFile("file")
 	if err != nil {
+		if isBodyTooLarge(err) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "PDF 超过 25MB 上限"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传 PDF 文件"})
 		return
 	}
@@ -481,6 +507,10 @@ func (s *Server) handleImportSubmissions(c *gin.Context) {
 		AutoGrade bool                  `json:"auto_grade"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
+		if isBodyTooLarge(err) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "导入数据超过 12MB 上限"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -500,7 +530,9 @@ func (s *Server) handleImportSubmissions(c *gin.Context) {
 			ids[i] = sub.ID
 		}
 		task, err := s.startNewTask(psetID, "import", ids)
-		if err != nil {
+		if errors.Is(err, db.ErrActiveTask) {
+			resp["task_error"] = "该题集已有批改任务在进行中，请完成后再批改新导入的答卷"
+		} else if err != nil {
 			resp["task_error"] = err.Error()
 		} else {
 			resp["task"] = task
@@ -568,9 +600,44 @@ func (s *Server) handleGradeOne(c *gin.Context) {
 		return
 	}
 
-	_ = s.Store.SetSubmissionStatus(id, "grading", "")
+	s.taskMu.Lock()
+	if s.oneShot[id] {
+		s.taskMu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": "该答卷正在单份批改中", "busy": true})
+		return
+	}
+	s.oneShot[id] = true
+	s.taskMu.Unlock()
+	defer func() {
+		s.taskMu.Lock()
+		delete(s.oneShot, id)
+		s.taskMu.Unlock()
+	}()
+
+	if sub.Status != "reviewed" {
+		claimed, err := s.Store.ClaimSubmissionForGrading(id)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !claimed {
+			c.JSON(http.StatusConflict, gin.H{"error": "该答卷状态已变化，请刷新后重试", "busy": true})
+			return
+		}
+	}
+
+	select {
+	case s.gradeSem <- struct{}{}:
+		defer func() { <-s.gradeSem }()
+	case <-c.Request.Context().Done():
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": "请求已取消"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 180*time.Second)
+	defer cancel()
 	cfg := s.loadLLMConfig()
-	res, err := grader.GradeSubmission(c.Request.Context(), cfg, *ps, sub.RawText)
+	res, err := grader.GradeSubmission(ctx, cfg, *ps, sub.RawText)
 	if err != nil {
 		_ = s.Store.SetSubmissionStatus(id, "error", err.Error())
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
@@ -600,9 +667,13 @@ func (s *Server) handleGradeAll(c *gin.Context) {
 		return
 	}
 	var body struct {
-		OnlyUnscored bool `json:"only_unscored"`
+		OnlyUnscored *bool `json:"only_unscored"`
 	}
 	_ = c.ShouldBindJSON(&body)
+	onlyUnscored := true
+	if body.OnlyUnscored != nil {
+		onlyUnscored = *body.OnlyUnscored
+	}
 
 	active, err := s.Store.GetActiveTask(psetID)
 	if err != nil {
@@ -626,11 +697,11 @@ func (s *Server) handleGradeAll(c *gin.Context) {
 			skipped++
 			continue
 		}
-		if body.OnlyUnscored && (sub.Status == "ai_graded" || sub.Status == "grading" || sub.Status == "queued") {
+		if onlyUnscored && (sub.Status == "ai_graded" || sub.Status == "grading" || sub.Status == "queued") {
 			skipped++
 			continue
 		}
-		if !body.OnlyUnscored && (sub.Status == "grading" || sub.Status == "queued") {
+		if !onlyUnscored && (sub.Status == "grading" || sub.Status == "queued") {
 			skipped++
 			continue
 		}
@@ -641,6 +712,13 @@ func (s *Server) handleGradeAll(c *gin.Context) {
 		return
 	}
 	task, err := s.startNewTask(psetID, "grade-all", ids)
+	if errors.Is(err, db.ErrActiveTask) {
+		active, _ := s.Store.GetActiveTask(psetID)
+		if active != nil {
+			c.JSON(http.StatusOK, gin.H{"task": active, "reused": true, "queued": 0, "skipped": skipped})
+			return
+		}
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -655,7 +733,7 @@ func (s *Server) startNewTask(psetID int64, source string, ids []int64) (*models
 	}
 	if task.Total == 0 {
 		_ = s.Store.SetTaskFinished(task.ID, "completed", "")
-		return task, nil
+		return s.Store.GetTask(task.ID)
 	}
 	go s.startTask(task.ID)
 	return task, nil
@@ -692,6 +770,7 @@ func (s *Server) startTask(taskID int64) {
 
 	task, err := s.Store.GetTask(taskID)
 	if err != nil {
+		_ = s.Store.SetTaskPaused(taskID, "读取任务失败: "+err.Error())
 		return
 	}
 	if task.Status == "canceled" {
@@ -705,7 +784,7 @@ func (s *Server) startTask(taskID int64) {
 	cfg := s.loadLLMConfig()
 	items, err := s.Store.ListQueuedTaskItems(taskID)
 	if err != nil {
-		_ = s.Store.SetTaskFinished(taskID, "failed", err.Error())
+		_ = s.Store.SetTaskPaused(taskID, "读取任务项失败: "+err.Error())
 		return
 	}
 	if len(items) == 0 {
@@ -714,7 +793,11 @@ func (s *Server) startTask(taskID int64) {
 		return
 	}
 	running, err := s.Store.SetTaskRunning(taskID)
-	if err != nil || !running {
+	if err != nil {
+		_ = s.Store.SetTaskPaused(taskID, "启动任务失败: "+err.Error())
+		return
+	}
+	if !running {
 		return
 	}
 
@@ -729,7 +812,7 @@ func (s *Server) startTask(taskID int64) {
 		go func() {
 			defer wg.Done()
 			for subID := range itemCh {
-				s.gradeTaskItem(ctx, taskID, subID, ps, cfg)
+				s.gradeTaskItemSafe(ctx, taskID, subID, ps, cfg)
 			}
 		}()
 	}
@@ -758,6 +841,18 @@ feed:
 		summary = fmt.Sprintf("%d 份失败，可在队列中重试", final.Failed)
 	}
 	_ = s.Store.SetTaskFinished(taskID, "completed", summary)
+}
+
+func (s *Server) gradeTaskItemSafe(ctx context.Context, taskID, subID int64, ps *models.ProblemSet, cfg grader.DeepSeekConfig) {
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("批改 worker panic: %v", r)
+			_ = s.Store.SetTaskItemStatus(taskID, subID, "failed", msg)
+			_ = s.Store.SetSubmissionStatus(subID, "error", msg)
+			_ = s.Store.RefreshTaskCounts(taskID)
+		}
+	}()
+	s.gradeTaskItem(ctx, taskID, subID, ps, cfg)
 }
 
 func (s *Server) gradeTaskItem(ctx context.Context, taskID, subID int64, ps *models.ProblemSet, cfg grader.DeepSeekConfig) {
@@ -796,9 +891,12 @@ func (s *Server) gradeTaskItem(ctx context.Context, taskID, subID int64, ps *mod
 	defer cancel()
 	res, err := grader.GradeSubmission(itemCtx, cfg, *ps, sub.RawText)
 	if err != nil {
-		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
-			_ = s.Store.SetTaskItemStatus(taskID, subID, "canceled", "已取消/超时")
-			_ = s.Store.SetSubmissionStatus(subID, "canceled", "批改已取消或超时")
+		if ctx.Err() != nil {
+			_ = s.Store.SetTaskItemStatus(taskID, subID, "canceled", "已取消")
+			_ = s.Store.SetSubmissionStatus(subID, "canceled", "批改已取消")
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			_ = s.Store.SetTaskItemStatus(taskID, subID, "failed", "批改超时（180s）")
+			_ = s.Store.SetSubmissionStatus(subID, "error", "批改超时（180s），可重试")
 		} else {
 			_ = s.Store.SetTaskItemStatus(taskID, subID, "failed", err.Error())
 			_ = s.Store.SetSubmissionStatus(subID, "error", err.Error())
@@ -881,7 +979,11 @@ func (s *Server) handleCancelTask(c *gin.Context) {
 		return
 	}
 	_ = s.Store.RefreshTaskCounts(id)
-	updated, _ := s.Store.GetTask(id)
+	updated, err := s.Store.GetTask(id)
+	if err != nil || updated == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务已不存在"})
+		return
+	}
 	c.JSON(http.StatusOK, updated)
 }
 
@@ -896,12 +998,23 @@ func (s *Server) handleResumeTask(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "只有暂停或失败的任务可以继续"})
 		return
 	}
+	s.taskMu.Lock()
+	alreadyRunning := s.taskRunning[id]
+	s.taskMu.Unlock()
+	if alreadyRunning {
+		c.JSON(http.StatusConflict, gin.H{"error": "任务仍在运行中"})
+		return
+	}
 	if err := s.Store.PrepareTaskResume(id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	go s.startTask(id)
-	updated, _ := s.Store.GetTask(id)
+	updated, err := s.Store.GetTask(id)
+	if err != nil || updated == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "任务已不存在"})
+		return
+	}
 	c.JSON(http.StatusOK, updated)
 }
 

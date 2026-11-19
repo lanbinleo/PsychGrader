@@ -71,7 +71,7 @@ export interface GradeViewProps {
   onSetActivePartId: (id: string | null) => void;
   onSetNotes: (n: string) => void;
   onResetToAI: () => void;
-  onSubUpdated: (s: Submission) => void;
+  onSubUpdated: (s: Submission, syncDraft?: boolean) => void;
   onSubsRefresh: () => Promise<Submission[]>;
   onBatchStarted: (task: GradingTask) => void;
   onCancelBatch: (id: number) => void;
@@ -92,6 +92,8 @@ export const GradeView: React.FC<GradeViewProps> = ({
   const [filter, setFilter]             = useState<'all' | 'unreviewed' | 'flagged'>('all');
   const [gradingIds, setGradingIds]     = useState<number[]>([]);
   const [saving, setSaving]             = useState(false);
+  const [starting, setStarting]         = useState(false);
+  const [exporting, setExporting]       = useState(false);
 
   const batchActive = !!batch && ['queued', 'running', 'paused'].includes(batch.status);
   const batchTerminal = !!batch && ['completed', 'failed', 'canceled'].includes(batch.status);
@@ -116,21 +118,25 @@ export const GradeView: React.FC<GradeViewProps> = ({
     if (!activeSub || gradingIds.includes(activeSub.id) || saving) return;
     const needsConfirm = activeSub.status === 'reviewed' || activeSub.status === 'needs_rereview';
     if (needsConfirm && !confirm('该答卷已核定。重跑会保留教师分项与批注，但会标记为“待复核”。继续？')) return;
+    const hadDirty = draftDirty;
     setGradingIds(ids => [...ids, activeSub.id]);
     try {
       const updated = await api.gradeOne(activeSub.id, needsConfirm);
       onSubUpdated(updated);
-      toast(`${updated.student_name.trim()} AI 评阅完成`);
+      toast(hadDirty
+        ? `${updated.student_name.trim()} AI 已更新；本地未核定的改分/批注已保留，请重新核定`
+        : `${updated.student_name.trim()} AI 评阅完成`);
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : '评阅失败');
       onSubsRefresh().catch(() => undefined);
     } finally {
       setGradingIds(ids => ids.filter(id => id !== activeSub.id));
     }
-  }, [activeSub, gradingIds, saving, onSubUpdated, onSubsRefresh, toast]);
+  }, [activeSub, draftDirty, gradingIds, saving, onSubUpdated, onSubsRefresh, toast]);
 
   const handleGradeAll = async () => {
-    if (batchActive) { toast('已有批改任务在进行中，请查看顶部进度'); return; }
+    if (batchActive || starting) { toast(batchActive ? '已有批改任务在进行中，请查看顶部进度' : '正在创建任务'); return; }
+    setStarting(true);
     try {
       const r = await api.gradeAll(pset.id, true);
       if (r.task) {
@@ -142,6 +148,8 @@ export const GradeView: React.FC<GradeViewProps> = ({
       }
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : '批量评阅失败');
+    } finally {
+      setStarting(false);
     }
   };
 
@@ -159,34 +167,46 @@ export const GradeView: React.FC<GradeViewProps> = ({
   };
 
   const handleExport = async () => {
+    if (exporting) return;
+    setExporting(true);
     try { await api.downloadCSV(pset.id); }
     catch (e: unknown) { toast(e instanceof Error ? e.message : '导出失败'); }
+    finally { setExporting(false); }
   };
 
   const handleSaveAndNext = async () => {
-    if (!activeSub || draftParts.length === 0 || saving) return;
+    if (!activeSub || draftParts.length === 0 || saving || activeGrading) return;
     setSaving(true);
+    let saved: Submission;
     try {
       const total = draftParts.reduce((s, p) => s + (p.teacher_score != null ? p.teacher_score : p.ai_score), 0);
-      const saved = await api.reviewSubmission(activeSub.id, total, draftNotes, draftParts);
-      onSubUpdated(saved);
-      const latest = await onSubsRefresh();
-      const idx = latest.findIndex(s => s.id === saved.id);
-      const next =
-        latest.slice(idx + 1).find(s => s.status !== 'reviewed' && s.status !== 'needs_rereview') ||
-        latest[idx + 1];
-      if (next) onSelectSub(next);
+      saved = await api.reviewSubmission(activeSub.id, total, draftNotes, draftParts);
+      onSubUpdated(saved, true);
       toast(`${saved.student_name.trim()} 核定 ${total} 分`);
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : '保存失败');
+      setSaving(false);
+      return;
+    }
+    try {
+      const latest = await onSubsRefresh();
+      const idx = latest.findIndex(s => s.id === saved.id);
+      if (idx >= 0) {
+        const next =
+          latest.slice(idx + 1).find(s => s.status !== 'reviewed' && s.status !== 'needs_rereview') ||
+          latest[idx + 1];
+        if (next) onSelectSub(next);
+      }
+    } catch {
+      toast('已保存核定，但列表刷新失败，请手动刷新');
     } finally {
       setSaving(false);
     }
   };
 
   const selectSub = (sub: Submission) => {
-    if (sub.id !== activeSub?.id && draftDirty &&
-        !confirm('当前答卷有未核定的改分/批注，切换后会丢失。继续？')) {
+    if (sub.id === activeSub?.id) return;
+    if (draftDirty && !confirm('当前答卷有未核定的改分/批注，切换后会丢失。继续？')) {
       return;
     }
     onSelectSub(sub);
@@ -250,7 +270,7 @@ export const GradeView: React.FC<GradeViewProps> = ({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSub, draftParts, activePartId, filtered, showImport, showShortcuts, draftDirty, saving, gradingIds, batchActive]);
+  }, [activeSub, draftParts, draftNotes, activePartId, filtered, showImport, showShortcuts, draftDirty, saving, gradingIds, batchActive]);
 
 
   return (
@@ -280,16 +300,17 @@ export const GradeView: React.FC<GradeViewProps> = ({
           >题干</button>
           <button
             onClick={handleGradeAll}
-            disabled={subs.length === 0 || batchActive}
+            disabled={subs.length === 0 || batchActive || starting}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-[#3F3D39] hover:bg-[#F2F0EA] disabled:opacity-40"
           >
-            <Sparkles className="w-3.5 h-3.5 text-[#92400E]" /> 全班批改
+            <Sparkles className="w-3.5 h-3.5 text-[#92400E]" /> {starting ? '创建中…' : '全班批改'}
           </button>
           <button
             onClick={handleExport}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-[#3F3D39] hover:bg-[#F2F0EA]"
+            disabled={exporting}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-[#3F3D39] hover:bg-[#F2F0EA] disabled:opacity-40"
           >
-            <FileSpreadsheet className="w-3.5 h-3.5" /> 导出
+            <FileSpreadsheet className="w-3.5 h-3.5" /> {exporting ? '导出中…' : '导出'}
           </button>
           <button onClick={() => setShowShortcuts(true)} className="p-1.5 rounded-lg text-[#57544E] hover:bg-[#F2F0EA]">
             <HelpCircle className="w-4 h-4" />
@@ -332,7 +353,7 @@ export const GradeView: React.FC<GradeViewProps> = ({
             </span>
           )}
           <div className="ml-auto flex items-center gap-1.5 shrink-0">
-            {batch.status === 'paused' && (
+            {(batch.status === 'paused' || batch.status === 'failed') && (
               <button onClick={handleResumeBatch} className="px-2 py-1 rounded-lg bg-[#191918] text-white text-[11px] font-medium">
                 继续批改
               </button>
@@ -340,6 +361,11 @@ export const GradeView: React.FC<GradeViewProps> = ({
             {batchActive && (
               <button onClick={handleCancelBatch} className="px-2 py-1 rounded-lg border border-[#DCD9D0] text-[11px] font-medium text-[#57544E] hover:bg-white">
                 取消
+              </button>
+            )}
+            {batchTerminal && batch.failed > 0 && (
+              <button onClick={handleGradeAll} className="px-2 py-1 rounded-lg bg-[#191918] text-white text-[11px] font-medium">
+                重试失败项
               </button>
             )}
             {batchTerminal && (
@@ -478,10 +504,10 @@ export const GradeView: React.FC<GradeViewProps> = ({
                   </button>
                   <button
                     onClick={handleGradeAll}
-                    disabled={subs.length === 0 || batchActive}
+                    disabled={subs.length === 0 || batchActive || starting}
                     className="w-full inline-flex items-center justify-center gap-1.5 py-2 rounded-lg border border-[#DCD9D0] text-xs font-medium text-[#3F3D39] hover:bg-[#FAF9F5] disabled:opacity-40"
                   >
-                    <Sparkles className="w-3.5 h-3.5 text-[#92400E]" /> 一键批改
+                    <Sparkles className="w-3.5 h-3.5 text-[#92400E]" /> {starting ? '创建中…' : '一键批改'}
                   </button>
                 </div>
               </div>
@@ -563,9 +589,10 @@ export const GradeView: React.FC<GradeViewProps> = ({
           psetId={pset.id}
           psetTitle={pset.title}
           onClose={() => setShowImport(false)}
-          onDone={(task) => {
+          onDone={(task, warning) => {
             setShowImport(false);
             if (task) onBatchStarted(task);
+            if (warning) toast(warning);
             onSubsRefresh().catch(() => undefined);
           }}
         />
@@ -593,7 +620,7 @@ const PaperPane: React.FC<{
   /* render sentence text with per-span colour highlighting (no badges, no overlays) */
   const renderSentence = (sentId: string, text: string): React.ReactNode => {
     if (!result) return text;
-    const anns = result.annotations.filter(a => a.sentence_id === sentId);
+    const anns = (result.annotations ?? []).filter(a => a.sentence_id === sentId);
     if (anns.length === 0) return text;
 
     type Sp = { start: number; end: number; ann: Annotation };
@@ -617,7 +644,7 @@ const PaperPane: React.FC<{
     let cursor = 0;
     spans.forEach((sp, i) => {
       if (sp.start > cursor) nodes.push(<span key={`pre${i}`}>{text.slice(cursor, sp.start)}</span>);
-      const st = CAT_STYLE[sp.ann.category];
+      const st = CAT_STYLE[sp.ann.category] || CAT_STYLE.issue;
       const focused = activePartId === sp.ann.part_id;
       nodes.push(
         <mark
@@ -637,10 +664,10 @@ const PaperPane: React.FC<{
 
   /* group sentences into paragraphs aligned with raw_text paragraph breaks */
   const paragraphs = useMemo(() => {
-    if (!result || result.sentences.length === 0) {
+    if (!result || (result.sentences ?? []).length === 0) {
       return sub.raw_text.split(/\n\s*\n/).filter(p => p.trim()).map(p => [{ id: '', en: p, zh: '' }]);
     }
-    const sents = result.sentences;
+    const sents = result.sentences ?? [];
     const rawParas = sub.raw_text.split(/\n\s*\n/).filter(p => p.trim());
     const grouped: { id: string; en: string; zh: string }[][] = [];
     let si = 0;
@@ -718,7 +745,7 @@ const PaperPane: React.FC<{
       {result && (
         <div className="flex flex-wrap items-center gap-3 mb-5 text-[11px] text-[#78756E]">
           {(Object.keys(CAT_STYLE) as AnnotationCategory[]).map(cat => {
-            const n = result.annotations.filter(a => a.category === cat).length;
+            const n = (result.annotations ?? []).filter(a => a.category === cat).length;
             if (n === 0) return null;
             return (
               <span key={cat} className="inline-flex items-center gap-1">
@@ -944,7 +971,7 @@ const RubricPane: React.FC<{
         </div>
         <button
           onClick={onSave}
-          disabled={saving || parts.length === 0}
+          disabled={saving || grading || parts.length === 0}
           className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#191918] text-white text-xs font-medium hover:bg-[#2E2D2A] disabled:opacity-40"
         >
           <Check className="w-3.5 h-3.5" />
@@ -1060,7 +1087,7 @@ const RubricPane: React.FC<{
    ImportModal
    ══════════════════════════════════════════════════════════════════ */
 const ImportModal: React.FC<{
-  psetId: number; psetTitle: string; onClose: () => void; onDone: (task?: GradingTask) => void;
+  psetId: number; psetTitle: string; onClose: () => void; onDone: (task?: GradingTask, warning?: string) => void;
 }> = ({ psetId, psetTitle, onClose, onDone }) => {
   const [file,       setFile]      = useState<File | null>(null);
   const [mode,       setMode]      = useState<'auto' | 'pages_per_student'>('auto');
@@ -1076,6 +1103,7 @@ const ImportModal: React.FC<{
   const parsePdf = async (f: File, m = mode, p = pps) => {
     const seq = ++parseSeq.current;
     setBusy(true); setErr('');
+    setSegs([]); setPages(0);
     try {
       const r = await api.parsePDF(psetId, f, m, p);
       if (seq !== parseSeq.current) return;
@@ -1148,8 +1176,8 @@ const ImportModal: React.FC<{
     setBusy(true); setErr('');
     try {
       const res = await api.importSubmissions(psetId, final, autoGrade);
-      if (res.task_error) setErr(`答卷已导入，但批改任务创建失败：${res.task_error}`);
-      onDone(res.task);
+      const warning = res.task_error ? `答卷已导入，但批改任务创建失败：${res.task_error}` : undefined;
+      onDone(res.task, warning);
     } catch (e: unknown) { setErr(e instanceof Error ? e.message : '导入失败'); }
     finally { setBusy(false); }
   };
@@ -1162,7 +1190,7 @@ const ImportModal: React.FC<{
             <div className="text-sm font-semibold text-[#191918]">导入答卷 · {psetTitle}</div>
             <div className="text-xs text-[#78756E] mt-0.5">上传批量 PDF 或直接粘贴文本，导入前可调整切分</div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-[#F2F0EA] text-[#78756E]">
+          <button onClick={onClose} disabled={busy} className="p-1.5 rounded-lg hover:bg-[#F2F0EA] text-[#78756E] disabled:opacity-40">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -1247,7 +1275,7 @@ const ImportModal: React.FC<{
             入库后立即 AI 批改
           </label>
           <div className="flex gap-2">
-            <button onClick={onClose} className="px-4 py-2 rounded-xl border border-[#DCD9D0] text-xs font-medium text-[#57544E] hover:bg-[#F5F3EE]">取消</button>
+            <button onClick={onClose} disabled={busy} className="px-4 py-2 rounded-xl border border-[#DCD9D0] text-xs font-medium text-[#57544E] hover:bg-[#F5F3EE] disabled:opacity-40">取消</button>
             <button onClick={confirm} disabled={busy} className="px-5 py-2 rounded-xl bg-[#191918] text-white text-xs font-medium disabled:opacity-50">
               {busy ? '处理中…' : `导入${segs.length ? ` (${segs.length})` : ''}`}
             </button>

@@ -47,6 +47,22 @@ func TestValidateBaseURLAllowlist(t *testing.T) {
 	}
 }
 
+func TestAllowedBaseURLPrefixBoundary(t *testing.T) {
+	t.Setenv("ALLOWED_API_BASE_URLS", "https://proxy.example.com")
+	s := &Server{}
+	if err := s.validateBaseURL("https://proxy.example.com/v1"); err != nil {
+		t.Fatalf("expected path under allowed base to pass: %v", err)
+	}
+	for _, raw := range []string{
+		"https://proxy.example.com.evil.example",
+		"https://proxy.example.com@evil.example",
+	} {
+		if err := s.validateBaseURL(raw); err == nil {
+			t.Fatalf("expected prefix bypass %q to be rejected", raw)
+		}
+	}
+}
+
 func TestTokenRoundTripAndExpiryShape(t *testing.T) {
 	s := NewServer(nil)
 	tok := s.signToken()

@@ -28,7 +28,7 @@
         └────────────────┘        └──────────────────────┘
 ```
 
-- 部署形态：单二进制 + 内嵌前端 `dist`，SQLite 文件持久化；Docker 运行时非 root（UID 1000）。
+- 部署形态：单二进制 + 同目录 `static`（Docker/本地构建产物）或外部 `STATIC_DIR`，SQLite 文件持久化；Docker 运行时非 root（UID 1000）。
 - 单教师/单口令模型；没有多租户、班级/花名册、学生登录。
 
 ## 2. 目录与职责
@@ -157,7 +157,7 @@ stateDiagram-v2
 
 ### 5.3 失败与重试
 
-- LLM 请求：429/5xx/网络错误最多 3 次指数退避（1s/2s），`context` 取消立即停止；单请求 150s，任务项上下文 180s（`handler` 未显式 180s，依赖 `http.Client` 与任务 ctx；后续可加）。
+- LLM 请求：429/5xx/网络错误最多 3 次指数退避（1s/2s），`context` 取消立即停止；单请求 150s，任务项/单份批改上下文 180s。
 - LLM 输出：缺任一 rubric part → 整份失败（不再静默 0 分）；`ai_score` 支持 `1`/`1.0`/`"1"`；`finish_reason=length` 报错；`exact_quote` 不在原句 → `unverified_quote` flag。
 - 失败项在任务里可“继续批改”（resume 会把 `failed` 项重新排队）；单份可点“重试”。
 
@@ -170,7 +170,7 @@ stateDiagram-v2
 - `onSubsRefresh()` 返回最新 `Submission[]`；`核定并下一份` 先 await 刷新，再按 id 选下一份，不再被 `OPEN_PSET` 的 `subs[0]` 覆盖。
 - 切换学生/返回题库时若有 `draftDirty`，弹确认。
 - 批量进度由 `batch: GradingTask | null` 驱动；轮询 `GET /tasks/:id`，每 2 tick 拉一次完整列表，终态后停止。轮询条件不再依赖 `subs.some(status==='grading')`。
-- 顶部进度条显示 `成功/失败/跳过`、`current[]` 当前学生、暂停/取消/继续/关闭。
+- 顶部进度条显示 `成功/失败/跳过`、`current[]` 当前学生、取消/继续/关闭。
 - 单份“重跑”按 `gradingIds` 独立禁用，不再用一个全局 `grading` 布尔；`reviewed/needs_rereview` 重跑需确认并传 `force`。
 
 ## 7. 安全模型
@@ -181,7 +181,8 @@ stateDiagram-v2
 | Token | HMAC(secret, `exp:passcode`)，7 天过期；`Authorization` header only；无 query token |
 | Secret | `APP_SECRET` 环境变量；为空则每进程随机生成（重启后旧 token 失效） |
 | CORS | 仅 `localhost:5173` / `127.0.0.1:5173` + `ALLOWED_ORIGINS`；无通配 |
-| 监听 | 默认 `127.0.0.1`；Docker 内 `HOST=0.0.0.0`，compose 只发布 `127.0.0.1` |
+| 监听 | 默认 `127.0.0.1`；非 loopback 且 `ADMIN_PASSCODE` 为空时拒绝启动；Docker 内 `HOST=0.0.0.0`，compose 只发布 `127.0.0.1` |
+| CSRF/写接口 | 非 GET 要求 `application/json`（PDF 上传为 multipart）；跨站 Origin 直接 403；`SetTrustedProxies(nil)` 防 X-Forwarded-For 伪造 |
 | API Base URL | 默认只允许 `api.deepseek.com`、localhost、`ALLOWED_API_HOSTS` / `ALLOWED_API_BASE_URLS` |
 | 测试连接 | 必须显式填 API Key，不再回退已保存 Key |
 | 上传 | 25MB `MaxBytesReader`、80 页、`pdftotext` 60s 超时 |
