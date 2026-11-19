@@ -369,9 +369,9 @@ func TestFullEndToEndPipeline(t *testing.T) {
 	// 8.6 Batch grading creates a persistent task and the second call is idempotent.
 	sophiaID := importOut.Submissions[1].ID
 	var batchOut struct {
-		Task  models.GradingTask `json:"task"`
-		Reuse bool               `json:"reused"`
-		Queued int               `json:"queued"`
+		Task   models.GradingTask `json:"task"`
+		Reuse  bool               `json:"reused"`
+		Queued int                `json:"queued"`
 	}
 	if code := doJSON("POST", "/api/problem-sets/1/grade-all", map[string]any{"only_unscored": true}, &batchOut); code != 202 {
 		t.Fatalf("grade-all failed: code=%d", code)

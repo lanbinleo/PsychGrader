@@ -25,7 +25,7 @@ func TestEnforceOfficialRulesBlocksDuplicateSourceAndConcept(t *testing.T) {
 			{PartID: "part_a", MaxScore: 1, AIScore: 1},
 			{PartID: "part_b_i", MaxScore: 1, AIScore: 1, CitedSource: "Source 1"},
 			{PartID: "part_b_ii", MaxScore: 2, AIScore: 2, AppliedConcept: "spacing effect"},
-			{PartID: "part_c_i", MaxScore: 1, AIScore: 1, CitedSource: "Source 1"},          // duplicate source!
+			{PartID: "part_c_i", MaxScore: 1, AIScore: 1, CitedSource: "Source 1"},            // duplicate source!
 			{PartID: "part_c_ii", MaxScore: 2, AIScore: 2, AppliedConcept: "spaced practice"}, // duplicate canonical concept!
 		},
 	}

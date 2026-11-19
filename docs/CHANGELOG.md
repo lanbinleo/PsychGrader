@@ -50,10 +50,11 @@
 
 ### 验证状态
 
-- 前端 `npx tsc --noEmit`：通过。
-- `npm run build`：本机 DSH 沙箱拦截 `spawn`（esbuild/Vite EPERM），未得到构建结果；需在正常终端/CI 重跑。
-- Go `go vet/test/build`：本机未安装 Go 工具链，未执行；`backend/e2e_test.go` 已扩展到覆盖 reviewed 保护、任务进度、CSV header 下载。
-- 多 Agent 复核：后端/前端/安全/产品四路审查已执行；本 changelog 对应修复项来自该报告。
+- 前端：`npm ci`、`npx tsc --noEmit`、`npm run build` 均通过；已生成新的 `frontend/dist`（Vite 6.4.6）。
+- 后端（Go 1.23.6，`D:/Desktop/Code/.toolchains/go`）：`gofmt -l .` 无输出；`go vet ./...`、`go test ./... -count=1`、`go build ./...` 全部通过。`go test -race` 因本机无 gcc/cgo 工具链未执行。
+- 运行时冒烟（临时 DB、端口 18090）：health、登录、未带 JSON 的写请求 415、跨站 Origin 403、`?token=` 401、静态前端 200 均符合预期；`import auto_grade` 创建任务并在 1/1 完成后落 `heuristic_fallback` 结果；reviewed 卷无 force 返回 409，force 后状态 `needs_rereview`、`final_score` 与 `teacher_score` 保留。
+- Docker：本机无 Docker，未执行 `docker compose build/up`；Dockerfile/compose 仅静态核对。
+- 多 Agent 复核：首轮 4 个（后端/前端/安全/产品）+ 第二轮 3 个（后端实现/前端实现/发布 QA），关键 P0/P1 均已修复并复验。
 
 ### 已知限制 / 下一步
 

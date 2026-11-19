@@ -7,11 +7,11 @@ import (
 
 func TestCSVCellEscapesFormulaAndNewlines(t *testing.T) {
 	cases := map[string]string{
-		"=1+1":       "'=1+1",
-		"+1":         "'+1",
-		"-1":         "'-1",
-		"@cmd":       "'@cmd",
-		"normal":     "normal",
+		"=1+1":        "'=1+1",
+		"+1":          "'+1",
+		"-1":          "'-1",
+		"@cmd":        "'@cmd",
+		"normal":      "normal",
 		"line\nbreak": "line break",
 	}
 	for in, want := range cases {

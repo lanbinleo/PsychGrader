@@ -48,7 +48,7 @@ cd ..
 - `frontend/dist` 被 `.gitignore` 忽略；新克隆必须构建，否则 `start-local.ps1` 会服务旧/缺失 UI。
 - 修改前端后重新 `npm run build`；开发时可用 `npm run dev`（Vite `5173`，代理 `/api` 到 `8090`）。
 - `start-local.ps1` 会停止已有 `psychgrader` 进程再启动；PID 会打印。
-- 当前机器没有 Go 工具链时，`go test` 无法执行；用 Docker 构建或在有 Go 1.23.6 的环境补跑。
+- 本机已有 Go 1.23.6：`D:/Desktop/Code/.toolchains/go/bin/go.exe`；可将其加入 PATH 后运行 `go test ./...`。没有 Go 的环境可用 Docker 构建。
 
 ## 4. Docker 部署
 
