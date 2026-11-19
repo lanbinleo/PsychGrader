@@ -18,6 +18,7 @@
 | `ADMIN_PASSCODE` | 空 | 空 = 关闭鉴权（仅本机）；共享部署必须设置 ≥16 字符随机值 |
 | `APP_SECRET` | 空 | 空 = 每进程随机生成，重启后旧 token 失效；生产建议固定 ≥32 字节随机值 |
 | `ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 额外允许的 CORS origin，逗号分隔；生产填反代域名 |
+| `TRUSTED_PROXIES` | 空 | 可信反代 CIDR 列表（逗号分隔）；为空时 `ClientIP` 用 `RemoteAddr`，反代后登录限流会按反代 IP 计数 |
 | `ALLOWED_API_HOSTS` | `api.deepseek.com` | 额外允许的 DeepSeek API 域名 |
 | `ALLOWED_API_BASE_URLS` | 空 | 额外允许的完整 base URL 前缀（适合代理） |
 | `DEEPSEEK_API_KEY` | 空 | 首次启动/未在设置页填写时使用 |
@@ -93,7 +94,8 @@ grader.example.com {
 
 - 不要打开 `HOST=0.0.0.0` + 公网端口；不要把 `9090`/`8090` 直接映射到 `0.0.0.0`。
 - 如用 Cloudflare Tunnel，Access 可作为额外一层；应用内仍有口令/token。
-- CORS 只影响浏览器跨域；反代同源部署不需要把域名加进 `ALLOWED_ORIGINS`（但前端 dev server 需要）。
+- CORS 只影响浏览器跨域；反代同源部署时应用按 `scheme://Host` 判断同源。**反代必须保留原始 `Host` 并设置 `X-Forwarded-Proto`**（Caddy 默认满足；Nginx 默认会把 Host 改成上游地址，需要 `proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme;`），否则同源写请求可能 403；也可以把生产域名加入 `ALLOWED_ORIGINS`。
+- `APP_SECRET` 若仍是 `replace-with-a-random-secret` 或短于 32 字符，进程会拒绝启动；`start-local.ps1` 在本地会临时生成随机 secret（重启后 token 失效）。这是有意的 fail-closed 变更，升级前请替换旧 secret。
 
 ## 5. 数据与备份
 

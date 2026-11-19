@@ -40,7 +40,7 @@ type Action =
   | { type: 'SET_SETTINGS'; settings: AppSettings }
   | { type: 'SET_PSETS'; psets: ProblemSet[] }
   | { type: 'OPEN_PSET'; pset: ProblemSet; subs: Submission[] }
-  | { type: 'SET_ACTIVE_PSET'; pset: ProblemSet }
+  | { type: 'SET_ACTIVE_PSET'; pset: ProblemSet; psetId: number }
   | { type: 'REFRESH_SUBS'; subs: Submission[]; psetId: number }
   | { type: 'SET_SUBS'; subs: Submission[] }
   | { type: 'SELECT_SUB'; sub: Submission }
@@ -73,6 +73,27 @@ function draftOf(sub: Submission | undefined | null): RubricPartScore[] {
   return sub?.result?.rubric_parts?.map(p => ({ ...p })) ?? [];
 }
 
+function hasTeacherEdit(p: RubricPartScore): boolean {
+  return p.teacher_score != null || !!p.teacher_comment;
+}
+
+// When the AI result changes while the teacher has unsaved edits, keep the
+// teacher's per-part override but take the NEW AI reason/flags/evidence.
+// Keeping the entire old draft would write old AI parts back over the new run.
+function mergeDraftParts(incoming: RubricPartScore[], draft: RubricPartScore[]): RubricPartScore[] {
+  if (incoming.length === 0) return draft;
+  const byID = new Map(draft.map(p => [p.part_id, p]));
+  return incoming.map(np => {
+    const old = byID.get(np.part_id);
+    if (!old || !hasTeacherEdit(old)) return np;
+    return {
+      ...np,
+      teacher_score: old.teacher_score ?? null,
+      teacher_comment: old.teacher_comment,
+    };
+  });
+}
+
 function reducer(s: State, a: Action): State {
   switch (a.type) {
     case 'SET_PAGE': return { ...s, page: a.page };
@@ -94,6 +115,7 @@ function reducer(s: State, a: Action): State {
       };
     }
     case 'SET_ACTIVE_PSET':
+      if (a.psetId !== s.activePset?.id) return s;
       return { ...s, activePset: a.pset };
     case 'REFRESH_SUBS':
     case 'SET_SUBS': {
@@ -110,7 +132,19 @@ function reducer(s: State, a: Action): State {
           activePartId: keepPart ? s.activePartId : (parts[0]?.part_id ?? null),
         };
       }
-      if (!active && a.subs.length > 0 && s.activeSubId === null) {
+      if (active && s.draftDirty) {
+        const parts = mergeDraftParts(draftOf(active), s.draftParts);
+        const keepPart = parts.some(p => p.part_id === s.activePartId);
+        return {
+          ...s,
+          subs: a.subs,
+          draftParts: parts,
+          draftNotes: s.draftNotes,
+          draftDirty: true,
+          activePartId: keepPart ? s.activePartId : (parts[0]?.part_id ?? null),
+        };
+      }
+      if (!active && a.subs.length > 0 && (s.activeSubId === null || !s.draftDirty)) {
         const first = a.subs[0];
         const parts = draftOf(first);
         return {
@@ -158,7 +192,18 @@ function reducer(s: State, a: Action): State {
     case 'UPDATE_SUB': {
       const subs = s.subs.map(x => (x.id === a.sub.id ? a.sub : x));
       if (s.activeSubId !== a.sub.id) return { ...s, subs };
-      if (!a.syncDraft && s.draftDirty) return { ...s, subs };
+      if (!a.syncDraft && s.draftDirty) {
+        const parts = mergeDraftParts(draftOf(a.sub), s.draftParts);
+        const keepPart = parts.some(p => p.part_id === s.activePartId);
+        return {
+          ...s,
+          subs,
+          draftParts: parts,
+          draftNotes: s.draftNotes,
+          draftDirty: true,
+          activePartId: keepPart ? s.activePartId : (parts[0]?.part_id ?? null),
+        };
+      }
       const parts = draftOf(a.sub);
       const keepPart = parts.some(p => p.part_id === s.activePartId);
       return {
@@ -233,36 +278,43 @@ export const App: React.FC = () => {
     const tick = async () => {
       if (cancelled) return;
       ticks++;
+      let task: GradingTask | null = null;
+      let terminal = false;
       try {
-        const task = await api.getTask(batchId);
+        const currentTask = await api.getTask(batchId);
+        task = currentTask;
         if (batchIdRef.current !== batchId) return;
-        const terminal = ['completed', 'failed', 'canceled'].includes(task.status);
-        const samePset = task.problem_set_id === activePsetIdRef.current;
+        terminal = ['completed', 'failed', 'canceled'].includes(currentTask.status);
+        const samePset = currentTask.problem_set_id === activePsetIdRef.current;
         // Refresh before publishing the terminal status: changing batchStatus
         // tears down this effect, so a post-dispatch refresh would be lost.
-        if (samePset && (ticks % 2 === 0 || task.status !== 'running')) {
-          const subs = await api.listSubmissions(task.problem_set_id);
+        if (samePset && (ticks % 2 === 0 || currentTask.status !== 'running')) {
+          const subs = await api.listSubmissions(currentTask.problem_set_id);
           if (batchIdRef.current !== batchId) return;
-          if (activePsetIdRef.current === task.problem_set_id) {
-            dispatch({ type: 'REFRESH_SUBS', subs, psetId: task.problem_set_id });
+          if (activePsetIdRef.current === currentTask.problem_set_id) {
+            dispatch({ type: 'REFRESH_SUBS', subs, psetId: currentTask.problem_set_id });
             const psets = await api.listProblemSets();
             if (batchIdRef.current !== batchId) return;
             dispatch({ type: 'SET_PSETS', psets });
-            const updated = psets.find(p => p.id === task.problem_set_id);
-            if (updated && activePsetIdRef.current === task.problem_set_id) {
-              dispatch({ type: 'SET_ACTIVE_PSET', pset: updated });
+            const updated = psets.find(p => p.id === currentTask.problem_set_id);
+            if (updated && activePsetIdRef.current === currentTask.problem_set_id) {
+              dispatch({ type: 'SET_ACTIVE_PSET', pset: updated, psetId: currentTask.problem_set_id });
             }
           }
         }
-        dispatch({ type: 'SET_BATCH', batch: task });
         failures = 0;
-        if (terminal) return;
       } catch {
         failures++;
         if (failures >= 3) {
           toast('进度刷新失败，请检查网络后刷新页面');
           return;
         }
+      }
+      // Publish the task state even if the list refresh above failed; otherwise
+      // a terminal task can look "running" forever.
+      if (task && !cancelled && batchIdRef.current === batchId) {
+        dispatch({ type: 'SET_BATCH', batch: task });
+        if (terminal) return;
       }
       if (!cancelled) timer = setTimeout(tick, 1500);
     };
@@ -300,7 +352,7 @@ export const App: React.FC = () => {
     dispatch({ type: 'SET_PSETS', psets });
     const updated = psets.find(p => p.id === psetId);
     if (updated && activePsetIdRef.current === psetId) {
-      dispatch({ type: 'SET_ACTIVE_PSET', pset: updated });
+      dispatch({ type: 'SET_ACTIVE_PSET', pset: updated, psetId });
     }
     return subs;
   }, [st.activePset]);

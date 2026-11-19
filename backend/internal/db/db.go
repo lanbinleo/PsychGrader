@@ -581,7 +581,7 @@ func (s *Store) ReconcileInterruptedTasks() error {
 	if _, err := tx.Exec(`UPDATE grading_tasks SET status = 'paused', error_summary = '服务重启中断，可在任务中心继续' WHERE status IN ('queued', 'running')`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE submissions SET status = 'queued', error_msg = '服务重启中断，等待继续', updated_at = ? WHERE status = 'grading' AND id IN (SELECT submission_id FROM grading_task_items)`, nowISO()); err != nil {
+	if _, err := tx.Exec(`UPDATE submissions SET status = 'queued', error_msg = '服务重启中断，等待继续', updated_at = ? WHERE status = 'grading' AND id IN (SELECT i.submission_id FROM grading_task_items i JOIN grading_tasks t ON t.id = i.task_id WHERE t.status = 'paused')`, nowISO()); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE submissions SET status = 'pending', error_msg = '服务重启中断，请重试单份批改', updated_at = ? WHERE status = 'grading' AND id NOT IN (SELECT submission_id FROM grading_task_items)`, nowISO()); err != nil {

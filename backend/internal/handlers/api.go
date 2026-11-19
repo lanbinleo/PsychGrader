@@ -614,6 +614,16 @@ func (s *Server) handleGradeOne(c *gin.Context) {
 		s.taskMu.Unlock()
 	}()
 
+	claimedForGrading := false
+	defer func() {
+		if !claimedForGrading {
+			return
+		}
+		if cur, err := s.Store.GetSubmission(id); err == nil && cur.Status == "grading" {
+			_ = s.Store.SetSubmissionStatus(id, "error", "批改异常中断，请重试")
+		}
+	}()
+
 	if sub.Status != "reviewed" {
 		claimed, err := s.Store.ClaimSubmissionForGrading(id)
 		if err != nil {
@@ -624,12 +634,14 @@ func (s *Server) handleGradeOne(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "该答卷状态已变化，请刷新后重试", "busy": true})
 			return
 		}
+		claimedForGrading = true
 	}
 
 	select {
 	case s.gradeSem <- struct{}{}:
 		defer func() { <-s.gradeSem }()
 	case <-c.Request.Context().Done():
+		_ = s.Store.SetSubmissionStatus(id, "error", "等待批改槽位时请求被取消")
 		c.JSON(http.StatusRequestTimeout, gin.H{"error": "请求已取消"})
 		return
 	}
@@ -718,6 +730,8 @@ func (s *Server) handleGradeAll(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"task": active, "reused": true, "queued": 0, "skipped": skipped})
 			return
 		}
+		c.JSON(http.StatusConflict, gin.H{"error": "任务状态已变化，请重试"})
+		return
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1009,6 +1023,7 @@ func (s *Server) handleResumeTask(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	_ = s.Store.RefreshTaskCounts(id)
 	go s.startTask(id)
 	updated, err := s.Store.GetTask(id)
 	if err != nil || updated == nil {

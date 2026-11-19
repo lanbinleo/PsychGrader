@@ -30,6 +30,13 @@ func main() {
 		// accident on a LAN.
 		host = "127.0.0.1"
 	}
+	if strings.TrimSpace(os.Getenv("ADMIN_PASSCODE")) != "" && len(strings.TrimSpace(os.Getenv("ADMIN_PASSCODE"))) < 12 {
+		log.Printf("WARNING: ADMIN_PASSCODE is shorter than 12 characters")
+	}
+	if sec := strings.TrimSpace(os.Getenv("APP_SECRET")); sec != "" &&
+		(len(sec) < 32 || sec == "replace-with-a-random-secret" || sec == "psychgrader-secret-change-me") {
+		log.Fatal("APP_SECRET must be a random value of at least 32 characters (refusing to start with a placeholder/weak secret)")
+	}
 	if strings.TrimSpace(os.Getenv("ADMIN_PASSCODE")) == "" {
 		switch host {
 		case "127.0.0.1", "localhost", "::1":
@@ -61,8 +68,19 @@ func main() {
 	r.MaxMultipartMemory = 8 << 20
 	// Gin trusts all proxies by default, which lets clients spoof
 	// X-Forwarded-For and bypass the login limiter. The app is meant to sit
-	// behind one reverse proxy; if needed, configure trusted proxies explicitly.
-	_ = r.SetTrustedProxies(nil)
+	// behind one reverse proxy; configure TRUSTED_PROXIES (CIDR list) only when
+	// that proxy is the sole ingress.
+	if tp := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); tp != "" {
+		var cidrs []string
+		for _, item := range strings.Split(tp, ",") {
+			if item = strings.TrimSpace(item); item != "" {
+				cidrs = append(cidrs, item)
+			}
+		}
+		_ = r.SetTrustedProxies(cidrs)
+	} else {
+		_ = r.SetTrustedProxies(nil)
+	}
 
 	// CORS is limited to the local Vite dev server and configured production
 	// origins. Wildcard CORS plus an empty passcode would let any website read
@@ -78,10 +96,14 @@ func main() {
 	}
 	r.Use(func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
-		sameOrigin := false
-		if i := strings.Index(origin, "://"); i >= 0 && origin[i+3:] == c.Request.Host {
-			sameOrigin = true
+		scheme := "http"
+		if c.Request.TLS != nil {
+			scheme = "https"
 		}
+		if xfp := c.GetHeader("X-Forwarded-Proto"); xfp != "" {
+			scheme = strings.ToLower(strings.TrimSpace(strings.Split(xfp, ",")[0]))
+		}
+		sameOrigin := origin == scheme+"://"+c.Request.Host
 		if origin != "" {
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")

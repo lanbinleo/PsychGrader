@@ -151,7 +151,7 @@ stateDiagram-v2
 
 1. `grading_task_items` 的 `running` → `queued`；
 2. `grading_tasks` 的 `queued/running` → `paused`，`error_summary='服务重启中断，可在任务中心继续'`；
-3. `submissions` 的 `grading` → `queued`。
+3. 有 task item 归属的 `submissions.grading` → `queued`；无 task 归属的单份批改 `grading` → `pending`（可重试）。
 
 前端打开题集时 `GET /problem-sets/:id/active-task` 会拿到 `paused` 任务，显示“继续批改/取消”。
 
@@ -169,9 +169,9 @@ stateDiagram-v2
 - `OPEN_PSET` 会 seed 第一份的草稿；`REFRESH_SUBS` **不会**重置选中，只在草稿干净时同步最新 AI 结果。
 - `onSubsRefresh()` 返回最新 `Submission[]`；`核定并下一份` 先 await 刷新，再按 id 选下一份，不再被 `OPEN_PSET` 的 `subs[0]` 覆盖。
 - 切换学生/返回题库时若有 `draftDirty`，弹确认。
-- 批量进度由 `batch: GradingTask | null` 驱动；轮询 `GET /tasks/:id`，每 2 tick 拉一次完整列表，终态后停止。轮询条件不再依赖 `subs.some(status==='grading')`。
-- 顶部进度条显示 `成功/失败/跳过`、`current[]` 当前学生、取消/继续/关闭。
+- 批量进度由 `batch: GradingTask | null` 驱动；轮询 `GET /tasks/:id`，每 2 tick 拉一次完整列表，终态后停止。轮询条件不再依赖 `subs.some(status==='grading')`。- 顶部进度条显示 `成功/失败/跳过`、`current[]` 当前学生、取消/继续/关闭。
 - 单份“重跑”按 `gradingIds` 独立禁用，不再用一个全局 `grading` 布尔；`reviewed/needs_rereview` 重跑需确认并传 `force`。
+- AI 结果在教师 dirty 草稿期间更新时，按 `part_id` 合并：AI 的 reason/flags/evidence 取新值，教师 `teacher_score/teacher_comment` 保留；避免把旧 AI 分项写回覆盖新结果。
 
 ## 7. 安全模型
 

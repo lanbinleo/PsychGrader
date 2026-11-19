@@ -28,6 +28,7 @@
 - **上传/解析**：25MB `MaxBytesReader`、80 页、`pdftotext` 60s 超时、HTTP server 全套超时、Docker 非 root/healthcheck。
 - **CSV**：公式注入转义（`= + - @ \t` 前置 `'`）、CR/LF 清理、RFC 2231 中文文件名、`Cache-Control: no-store`。
 - **Docker**：新增 `.dockerignore`（.env / data / node_modules / dist / .git），避免把宿主 Windows `node_modules` 和 PII 带进构建上下文；非 root UID 1000、cap_drop、healthcheck；compose 端口绑定 loopback。
+- **复审保护合并**：AI 重跑返回时若教师有未核定改分，前端按 `part_id` 合并教师覆盖与新 AI reason/flags/evidence，不再整份保留旧草稿；避免“新 AI 总分 + 旧 AI 分项”混写。
 - **第二轮审查补丁**：`SaveGradingResult` 改为先合并教师分项再 marshal（否则 force 重跑仍会丢分项）；单份批改也走 `oneShot` 互斥 + `gradeSem` + 180s 超时；`CreateGradingTask` 在事务内检查“每 pset 唯一活跃任务”（import/grade-all 并发统一返回复用或 task_error）；启动对账把无 task 归属的 grading 卷置 `pending`，不再卡 `queued`；超时归 `failed` 不归 `canceled`；`SetTaskItemStatus` 加终态保护；`RefreshTaskCounts` 重算 total；worker 加 `recover`；非 GET 写接口要求 `application/json`（PDF 上传要求 multipart）并拒绝跨站 Origin；`ALLOWED_API_BASE_URLS` 改 host/path 边界匹配；`r.SetTrustedProxies(nil)` 防 X-Forwarded-For 绕过登录限流；非 loopback + 空口令时拒绝启动。
 
 ### API 变化（可能 breaking）
@@ -38,6 +39,7 @@
 - `GET /export.csv` **不再接受 `?token=`**，必须用 `Authorization` header。
 - 答卷状态新增 `queued`、`needs_rereview`、`canceled`。
 - `POST /settings/test` 必须显式传 API Key；`PUT /settings` 的 `api_base_url` 受白名单限制。
+- 非 loopback + 空 `ADMIN_PASSCODE` 拒绝启动；`APP_SECRET` 为占位值/短于 32 字符拒绝启动；写接口要求 `application/json`（PDF 为 multipart）。
 - 默认监听 `127.0.0.1`；Docker 内 `HOST=0.0.0.0`，compose 只发布 loopback。
 
 ### 数据库

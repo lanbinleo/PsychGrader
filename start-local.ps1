@@ -1,4 +1,4 @@
-﻿param(
+param(
     [int]$Port = 8090,
     [string]$Passcode = ""
 )
@@ -30,6 +30,10 @@ Get-Process -Name "psychgrader" -ErrorAction SilentlyContinue | Stop-Process -Fo
 $env:HOST = "127.0.0.1"
 $env:PORT = "$Port"
 if ($Passcode) { $env:ADMIN_PASSCODE = $Passcode }
+if (-not $env:APP_SECRET -or $env:APP_SECRET -eq "replace-with-a-random-secret" -or $env:APP_SECRET.Length -lt 32) {
+    # Local runs get a process-local random secret; tokens expire on restart.
+    $env:APP_SECRET = ([guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N"))
+}
 if (-not $env:ADMIN_PASSCODE) {
     Write-Warning "ADMIN_PASSCODE is empty. The server binds 127.0.0.1 only; set it before exposing the app."
 }

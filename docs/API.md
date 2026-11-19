@@ -296,7 +296,6 @@ Token 由登录返回，HMAC 签名，默认 **7 天过期**；`APP_SECRET` 为�
 - 任务：每 1.5s `GET /tasks/:id`；
 - 队列：每 2 次任务轮询拉一次 `GET /problem-sets/:id/submissions`（完整结果）；
 - 终态后停止轮询并刷一次题集统计。
-- 终态后停止轮询并刷一次题集统计。
 - 页面隐藏时建议暂停轮询（前端后续可加 `visibilitychange`），恢复时立即拉一次。
 
 ---
@@ -336,7 +335,9 @@ Token 由登录返回，HMAC 签名，默认 **7 天过期**；`APP_SECRET` 为�
 | 401 | 缺失/过期 token，或口令错误 |
 | 404 | 题集/答卷/任务不存在，或答卷在批改期间被删除 |
 | 409 | 答卷正在批改、已核定但未 force、任务已结束、任务不满足 resume 条件 |
+| 408 | 单份批改等待并发槽位时请求被取消（状态会回写 error，可重试） |
 | 413 | PDF/JSON 超过大小上限 |
+| 415 | 写接口 `Content-Type` 不是 `application/json`（PDF 上传不是 multipart） |
 | 429 | 登录失败次数过多 |
 | 500 | 数据库/SQLite 错误 |
 | 502 | DeepSeek 请求失败（含上游 4xx/5xx、超时、JSON 校验失败） |

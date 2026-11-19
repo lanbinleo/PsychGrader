@@ -124,7 +124,7 @@ export const GradeView: React.FC<GradeViewProps> = ({
       const updated = await api.gradeOne(activeSub.id, needsConfirm);
       onSubUpdated(updated);
       toast(hadDirty
-        ? `${updated.student_name.trim()} AI 已更新；本地未核定的改分/批注已保留，请重新核定`
+        ? `${updated.student_name.trim()} AI 已更新；本地改分/批注已合并到新分项，请重新核定`
         : `${updated.student_name.trim()} AI 评阅完成`);
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : '评阅失败');
@@ -222,7 +222,11 @@ export const GradeView: React.FC<GradeViewProps> = ({
     if (!confirm('确定移除这份答卷？')) return;
     try {
       await api.deleteSubmission(id);
-      await onSubsRefresh();
+      const latest = await onSubsRefresh();
+      if (activeSub?.id === id) {
+        const next = latest[0];
+        if (next) onSelectSub(next);
+      }
       toast('已移除答卷');
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : '删除失败');
