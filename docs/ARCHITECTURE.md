@@ -170,7 +170,7 @@ stateDiagram-v2
 - `onSubsRefresh()` 返回最新 `Submission[]`；`核定并下一份` 先 await 刷新，再按 id 选下一份，不再被 `OPEN_PSET` 的 `subs[0]` 覆盖。
 - 切换学生/返回题库时若有 `draftDirty`，弹确认。
 - 批量进度由 `batch: GradingTask | null` 驱动；轮询 `GET /tasks/:id`，每 2 tick 拉一次完整列表，终态后停止。轮询条件不再依赖 `subs.some(status==='grading')`。- 顶部进度条显示 `成功/失败/跳过`、`current[]` 当前学生、取消/继续/关闭。
-- 单份“重跑”按 `gradingIds` 独立禁用，不再用一个全局 `grading` 布尔；`reviewed/needs_rereview` 重跑需确认并传 `force`。
+- 单份“重跑”按 `gradingIds` 独立禁用，不再用一个全局 `grading` 布尔；`reviewed/needs_rereview` 重跑需确认并传 `force`。队列行的转圈同样读 `gradingIds`：单份重跑期间后端不会把 `reviewed` 卷改成 `grading`（复审保护），只靠 `subs.status` 会让队列在整段 LLM 调用里毫无反馈。
 - AI 结果在教师 dirty 草稿期间更新时，按 `part_id` 合并：AI 的 reason/flags/evidence 取新值，教师 `teacher_score/teacher_comment` 保留；避免把旧 AI 分项写回覆盖新结果。
 
 ## 7. 安全模型

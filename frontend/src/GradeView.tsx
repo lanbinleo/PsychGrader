@@ -462,6 +462,10 @@ export const GradeView: React.FC<GradeViewProps> = ({
                 <div className="flex-1 min-h-0 overflow-y-auto p-1.5 space-y-0.5">
                   {filtered.map(s => {
                     const sel  = s.id === activeSub?.id;
+                    // A single regrade keeps the server row as `reviewed`/`ai_graded`
+                    // until the LLM returns, so without this the queue shows no sign
+                    // of life until the user leaves and re-enters the problem set.
+                    const rowGrading = gradingIds.includes(s.id) || s.status === 'grading';
                     const sc   = s.final_score ?? s.ai_score;
                     const warn = s.result?.rubric_parts?.some(p => p.flags?.length);
                     const dot  = s.status === 'error' ? 'bg-[#BE123C]'
@@ -477,7 +481,7 @@ export const GradeView: React.FC<GradeViewProps> = ({
                           sel ? 'bg-[#F2EFE8]' : 'hover:bg-[#FAF9F5]'
                         }`}
                       >
-                        {s.status === 'grading'
+                        {rowGrading
                           ? <Loader2 className="w-3.5 h-3.5 text-[#92400E] animate-spin shrink-0" />
                           : s.status === 'queued'
                             ? <Loader2 className="w-3.5 h-3.5 text-[#A39F96] animate-pulse shrink-0" />
